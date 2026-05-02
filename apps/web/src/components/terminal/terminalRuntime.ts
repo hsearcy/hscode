@@ -620,6 +620,17 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     wrapper.removeEventListener("copy", handleCopy);
   });
 
+  const handlePaste = (event: ClipboardEvent) => {
+    const text = event.clipboardData?.getData("text/plain");
+    if (!text) return;
+    event.preventDefault();
+    void sendTerminalInput(entry, text, "Failed to paste");
+  };
+  wrapper.addEventListener("paste", handlePaste);
+  entry.persistentDisposables.push(() => {
+    wrapper.removeEventListener("paste", handlePaste);
+  });
+
   terminal.attachCustomKeyEventHandler((event) => {
     if (
       event.type === "keydown" &&
@@ -634,8 +645,31 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
         .then((text) => {
           if (text) void sendTerminalInput(entry, text, "Failed to paste");
         })
-        .catch(() => undefined);
+        .catch((error) => {
+          writeSystemMessage(
+            terminal,
+            `Paste failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       return false;
+    }
+
+    if (
+      event.type === "keydown" &&
+      event.key.toLowerCase() === "c" &&
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey &&
+      !event.shiftKey
+    ) {
+      const selection = terminal.getSelection();
+      if (selection) {
+        event.preventDefault();
+        event.stopPropagation();
+        const trimmed = selection.replace(/[^\S\n]+$/gm, "");
+        void navigator.clipboard?.writeText(trimmed).catch(() => undefined);
+        terminal.clearSelection();
+        return false;
+      }
     }
 
     if (

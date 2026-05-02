@@ -1922,10 +1922,17 @@ function configureMediaPermissions(): void {
         ? systemPreferences.getMediaAccessStatus("microphone") === "granted"
         : false;
     }
+    if (permission === "clipboard-read" || permission === "clipboard-sanitized-write") {
+      return true;
+    }
     return false;
   });
 
   defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === "clipboard-read" || permission === "clipboard-sanitized-write") {
+      callback(true);
+      return;
+    }
     if (permission !== "media") {
       callback(false);
       return;
