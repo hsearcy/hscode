@@ -531,6 +531,8 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         url: `http://localhost:${mockUpdateServerPort ?? 3000}`,
       },
     ];
+  } else {
+    buildConfig.publish = null;
   }
 
   const windowsAzureSignOptions =
