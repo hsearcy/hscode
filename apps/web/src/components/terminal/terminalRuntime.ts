@@ -623,6 +623,23 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
   terminal.attachCustomKeyEventHandler((event) => {
     if (
       event.type === "keydown" &&
+      event.key.toLowerCase() === "v" &&
+      (event.metaKey || event.ctrlKey) &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      void navigator.clipboard
+        ?.readText()
+        .then((text) => {
+          if (text) void sendTerminalInput(entry, text, "Failed to paste");
+        })
+        .catch(() => undefined);
+      return false;
+    }
+
+    if (
+      event.type === "keydown" &&
       event.key === "Enter" &&
       event.shiftKey &&
       !event.metaKey &&
