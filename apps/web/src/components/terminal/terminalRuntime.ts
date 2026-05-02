@@ -524,6 +524,8 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
   const terminal = new Terminal({
     cursorBlink: true,
     fontSize: 12,
+    fontWeight: 700,
+    fontWeightBold: 700,
     scrollback: 5_000,
     fontFamily: getTerminalFontFamily(),
     theme: terminalThemeFromApp(),

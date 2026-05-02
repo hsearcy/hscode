@@ -5,7 +5,7 @@
 import { Terminal, type ITheme } from "@xterm/xterm";
 
 const FALLBACK_MONO_FONT_FAMILY =
-  '"JetBrainsMono NFM", "JetBrainsMono NF", "JetBrains Mono", monospace';
+  '"OperatorMono Nerd Font", "Operator Mono", "MesloLGS NF", "MesloLGM NF", "Meslo LG M for Powerline", "Meslo LG L for Powerline", "Meslo LG S for Powerline", "Hack Nerd Font", "Hack", "FiraCode Nerd Font", "JetBrainsMono NFM", "JetBrainsMono NF", "JetBrains Mono", "Symbols Nerd Font", monospace';
 
 export function getTerminalFontFamily(): string {
   if (typeof window === "undefined") {
