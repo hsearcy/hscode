@@ -328,6 +328,16 @@ export interface GitCoreShape {
    * List local branch names (short format).
    */
   readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
+
+  /**
+   * Resolve the merge-base commit oid between the auto-detected base branch
+   * (configured `branch.<name>.gh-merge-base`, primary remote default branch,
+   * or `main`/`master` fallback) and the current `HEAD`.
+   *
+   * Returns `null` when the base branch cannot be resolved, when `HEAD` is
+   * detached, or when `git merge-base` finds no common ancestor.
+   */
+  readonly resolveBaseMergeBase: (cwd: string) => Effect.Effect<string | null, GitCommandError>;
 }
 
 /**

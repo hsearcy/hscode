@@ -237,7 +237,9 @@ const makeCheckpointStore = Effect.gen(function* () {
     Effect.gen(function* () {
       const operation = "CheckpointStore.diffCheckpoints";
 
-      let fromCommitOid = yield* resolveCheckpointCommit(input.cwd, input.fromCheckpointRef);
+      let fromCommitOid = input.fromCommitOidOverride
+        ? input.fromCommitOidOverride
+        : yield* resolveCheckpointCommit(input.cwd, input.fromCheckpointRef);
       const toCommitOid = yield* resolveCheckpointCommit(input.cwd, input.toCheckpointRef);
 
       if (!fromCommitOid && input.fallbackFromToHead === true) {

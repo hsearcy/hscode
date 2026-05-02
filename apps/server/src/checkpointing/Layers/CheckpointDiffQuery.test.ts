@@ -2,6 +2,7 @@ import { CheckpointRef, ProjectId, ThreadId, TurnId } from "@t3tools/contracts";
 import { Effect, Layer, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { GitCore, type GitCoreShape } from "../../git/Services/GitCore.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionThreadCheckpointContext,
@@ -10,6 +11,42 @@ import { checkpointRefForThreadTurn, checkpointRefForThreadTurnStart } from "../
 import { CheckpointDiffQueryLive } from "./CheckpointDiffQuery.ts";
 import { CheckpointStore, type CheckpointStoreShape } from "../Services/CheckpointStore.ts";
 import { CheckpointDiffQuery } from "../Services/CheckpointDiffQuery.ts";
+
+function makeStubGitCore(overrides: Partial<GitCoreShape> = {}): GitCoreShape {
+  const die = (name: string) => () => Effect.die(`GitCore.${name} unused in test`);
+  return {
+    execute: die("execute"),
+    status: die("status"),
+    statusDetails: die("statusDetails"),
+    readWorkingTreePatch: die("readWorkingTreePatch"),
+    prepareCommitContext: die("prepareCommitContext"),
+    commit: die("commit"),
+    pushCurrentBranch: die("pushCurrentBranch"),
+    pullCurrentBranch: die("pullCurrentBranch"),
+    readRangeContext: die("readRangeContext"),
+    readConfigValue: die("readConfigValue"),
+    listBranches: die("listBranches"),
+    createWorktree: die("createWorktree"),
+    createDetachedWorktree: die("createDetachedWorktree"),
+    fetchPullRequestBranch: die("fetchPullRequestBranch"),
+    ensureRemote: die("ensureRemote"),
+    fetchRemoteBranch: die("fetchRemoteBranch"),
+    setBranchUpstream: die("setBranchUpstream"),
+    removeWorktree: die("removeWorktree"),
+    renameBranch: die("renameBranch"),
+    createBranch: die("createBranch"),
+    publishBranch: die("publishBranch"),
+    checkoutBranch: die("checkoutBranch"),
+    stashAndCheckout: die("stashAndCheckout"),
+    stashDrop: die("stashDrop"),
+    stashInfo: die("stashInfo"),
+    removeIndexLock: die("removeIndexLock"),
+    initRepo: die("initRepo"),
+    listLocalBranchNames: die("listLocalBranchNames"),
+    resolveBaseMergeBase: () => Effect.succeed(null),
+    ...overrides,
+  } as GitCoreShape;
+}
 
 function makeThreadCheckpointContext(input: {
   readonly projectId: ProjectId;
@@ -82,6 +119,7 @@ describe("CheckpointDiffQueryLive", () => {
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(GitCore, makeStubGitCore())),
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
@@ -141,6 +179,7 @@ describe("CheckpointDiffQueryLive", () => {
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(GitCore, makeStubGitCore())),
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
@@ -198,6 +237,7 @@ describe("CheckpointDiffQueryLive", () => {
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(GitCore, makeStubGitCore())),
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
@@ -256,6 +296,7 @@ describe("CheckpointDiffQueryLive", () => {
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(GitCore, makeStubGitCore())),
       Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
@@ -285,5 +326,162 @@ describe("CheckpointDiffQueryLive", () => {
         }).pipe(Effect.provide(layer)),
       ),
     ).rejects.toThrow("Checkpoint diff is not available yet for turn 1.");
+  });
+
+  it("anchors getFullThreadDiff at the base-branch merge-base when available", async () => {
+    const projectId = ProjectId.makeUnsafe("project-mb");
+    const threadId = ThreadId.makeUnsafe("thread-mb");
+    const toCheckpointRef = checkpointRefForThreadTurn(threadId, 3);
+    const mergeBaseOid = "abc123def456";
+
+    const threadCheckpointContext = makeThreadCheckpointContext({
+      projectId,
+      threadId,
+      workspaceRoot: "/tmp/workspace-mb",
+      envMode: "local",
+      worktreePath: null,
+      checkpointTurnCount: 3,
+      checkpointRef: toCheckpointRef,
+    });
+
+    const diffCalls: Array<{
+      readonly fromCheckpointRef: CheckpointRef;
+      readonly toCheckpointRef: CheckpointRef;
+      readonly fromCommitOidOverride: string | undefined;
+    }> = [];
+    const checkpointStore: CheckpointStoreShape = {
+      isGitRepository: () => Effect.succeed(true),
+      captureCheckpoint: () => Effect.void,
+      copyCheckpointRef: () => Effect.succeed(true),
+      hasCheckpointRef: () => Effect.succeed(true),
+      restoreCheckpoint: () => Effect.succeed(true),
+      diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, fromCommitOidOverride }) =>
+        Effect.sync(() => {
+          diffCalls.push({ fromCheckpointRef, toCheckpointRef, fromCommitOidOverride });
+          return "merge-base diff";
+        }),
+      deleteCheckpointRefs: () => Effect.void,
+    };
+
+    const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(
+        Layer.succeed(
+          GitCore,
+          makeStubGitCore({
+            resolveBaseMergeBase: () => Effect.succeed(mergeBaseOid),
+          }),
+        ),
+      ),
+      Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
+      Layer.provideMerge(
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getSnapshot: () => Effect.die("unused"),
+          getCounts: () => Effect.die("unused"),
+          getShellSnapshot: () => Effect.die("unused"),
+          getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+          getProjectShellById: () => Effect.die("unused"),
+          getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+          getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
+          getThreadShellById: () => Effect.die("unused"),
+          getThreadDetailById: () => Effect.die("unused"),
+          getThreadDetailSnapshotById: () => Effect.die("unused"),
+        }),
+      ),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery;
+        return yield* query.getFullThreadDiff({
+          threadId,
+          toTurnCount: 3,
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(diffCalls).toEqual([
+      {
+        fromCheckpointRef: toCheckpointRef,
+        toCheckpointRef,
+        fromCommitOidOverride: mergeBaseOid,
+      },
+    ]);
+    expect(result).toEqual({
+      threadId,
+      fromTurnCount: 0,
+      toTurnCount: 3,
+      diff: "merge-base diff",
+    });
+  });
+
+  it("falls back to start-of-thread anchoring when no merge-base is available", async () => {
+    const projectId = ProjectId.makeUnsafe("project-fallback");
+    const threadId = ThreadId.makeUnsafe("thread-fallback");
+    const toCheckpointRef = checkpointRefForThreadTurn(threadId, 2);
+    const startCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
+
+    const threadCheckpointContext = makeThreadCheckpointContext({
+      projectId,
+      threadId,
+      workspaceRoot: "/tmp/workspace-fb",
+      envMode: "local",
+      worktreePath: null,
+      checkpointTurnCount: 2,
+      checkpointRef: toCheckpointRef,
+    });
+
+    const diffCalls: Array<{
+      readonly fromCheckpointRef: CheckpointRef;
+      readonly fromCommitOidOverride: string | undefined;
+    }> = [];
+    const checkpointStore: CheckpointStoreShape = {
+      isGitRepository: () => Effect.succeed(true),
+      captureCheckpoint: () => Effect.void,
+      copyCheckpointRef: () => Effect.succeed(true),
+      hasCheckpointRef: () => Effect.succeed(true),
+      restoreCheckpoint: () => Effect.succeed(true),
+      diffCheckpoints: ({ fromCheckpointRef, fromCommitOidOverride }) =>
+        Effect.sync(() => {
+          diffCalls.push({ fromCheckpointRef, fromCommitOidOverride });
+          return "fallback diff";
+        }),
+      deleteCheckpointRefs: () => Effect.void,
+    };
+
+    const layer = CheckpointDiffQueryLive.pipe(
+      Layer.provideMerge(Layer.succeed(GitCore, makeStubGitCore())),
+      Layer.provideMerge(Layer.succeed(CheckpointStore, checkpointStore)),
+      Layer.provideMerge(
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getSnapshot: () => Effect.die("unused"),
+          getCounts: () => Effect.die("unused"),
+          getShellSnapshot: () => Effect.die("unused"),
+          getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
+          getProjectShellById: () => Effect.die("unused"),
+          getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+          getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
+          getThreadShellById: () => Effect.die("unused"),
+          getThreadDetailById: () => Effect.die("unused"),
+          getThreadDetailSnapshotById: () => Effect.die("unused"),
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery;
+        return yield* query.getFullThreadDiff({
+          threadId,
+          toTurnCount: 2,
+        });
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(diffCalls).toEqual([
+      {
+        fromCheckpointRef: startCheckpointRef,
+        fromCommitOidOverride: undefined,
+      },
+    ]);
   });
 });

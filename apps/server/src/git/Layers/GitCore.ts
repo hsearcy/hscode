@@ -1097,6 +1097,42 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         return null;
       });
 
+    const resolveBaseMergeBase: GitCoreShape["resolveBaseMergeBase"] = (cwd) =>
+      Effect.gen(function* () {
+        const branchResult = yield* executeGit(
+          "GitCore.resolveBaseMergeBase.branch",
+          cwd,
+          ["symbolic-ref", "--short", "--quiet", "HEAD"],
+          { allowNonZeroExit: true },
+        );
+        if (branchResult.code !== 0) {
+          return null;
+        }
+        const branch = branchResult.stdout.trim();
+        if (branch.length === 0) {
+          return null;
+        }
+
+        const baseBranch = yield* resolveBaseBranchForNoUpstream(cwd, branch).pipe(
+          Effect.catch(() => Effect.succeed(null)),
+        );
+        if (!baseBranch) {
+          return null;
+        }
+
+        const mergeBaseResult = yield* executeGit(
+          "GitCore.resolveBaseMergeBase.mergeBase",
+          cwd,
+          ["merge-base", baseBranch, "HEAD"],
+          { allowNonZeroExit: true },
+        );
+        if (mergeBaseResult.code !== 0) {
+          return null;
+        }
+        const oid = mergeBaseResult.stdout.trim();
+        return oid.length > 0 ? oid : null;
+      });
+
     const computeAheadCountAgainstBase = (
       cwd: string,
       branch: string,
@@ -2328,6 +2364,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
       removeIndexLock,
       initRepo,
       listLocalBranchNames,
+      resolveBaseMergeBase,
     } satisfies GitCoreShape;
   });
 

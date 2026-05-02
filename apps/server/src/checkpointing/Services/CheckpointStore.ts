@@ -38,6 +38,12 @@ export interface DiffCheckpointsInput {
   readonly fromCheckpointRef: CheckpointRef;
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
+  /**
+   * Diff against this raw commit oid as the "from" side, bypassing
+   * `fromCheckpointRef` resolution. Used by full-thread diffs to anchor at
+   * the merge-base of the base branch and `HEAD` (GitHub PR semantics).
+   */
+  readonly fromCommitOidOverride?: string;
 }
 
 export interface DeleteCheckpointRefsInput {

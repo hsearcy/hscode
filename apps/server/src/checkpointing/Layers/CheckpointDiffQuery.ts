@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
 
+import { GitCore } from "../../git/Services/GitCore.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { CheckpointInvariantError, CheckpointUnavailableError } from "../Errors.ts";
 import {
@@ -24,6 +25,7 @@ const isTurnDiffResult = Schema.is(OrchestrationGetTurnDiffResult);
 const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const checkpointStore = yield* CheckpointStore;
+  const gitCore = yield* GitCore;
 
   const getTurnDiff: CheckpointDiffQueryShape["getTurnDiff"] = (input) =>
     Effect.gen(function* () {
@@ -202,11 +204,106 @@ const make = Effect.gen(function* () {
   const getFullThreadDiff: CheckpointDiffQueryShape["getFullThreadDiff"] = (
     input: OrchestrationGetFullThreadDiffInput,
   ) =>
-    getTurnDiff({
-      threadId: input.threadId,
-      fromTurnCount: 0,
-      toTurnCount: input.toTurnCount,
-    }).pipe(Effect.map((result): OrchestrationGetFullThreadDiffResult => result));
+    Effect.gen(function* () {
+      const operation = "CheckpointDiffQuery.getFullThreadDiff";
+
+      const threadContext = yield* projectionSnapshotQuery.getThreadCheckpointContext(
+        input.threadId,
+      );
+      if (Option.isNone(threadContext)) {
+        return yield* new CheckpointInvariantError({
+          operation,
+          detail: `Thread '${input.threadId}' not found.`,
+        });
+      }
+
+      const workspaceCwd = resolveThreadWorkspaceCwd({
+        thread: {
+          projectId: threadContext.value.projectId,
+          envMode: threadContext.value.envMode,
+          worktreePath: threadContext.value.worktreePath,
+        },
+        projects: [
+          {
+            id: threadContext.value.projectId,
+            workspaceRoot: threadContext.value.workspaceRoot,
+          },
+        ],
+      });
+      if (!workspaceCwd) {
+        return yield* new CheckpointInvariantError({
+          operation,
+          detail: `Workspace path missing for thread '${input.threadId}' when computing full-thread diff.`,
+        });
+      }
+
+      const mergeBaseOid = yield* gitCore
+        .resolveBaseMergeBase(workspaceCwd)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+
+      // No merge-base available (no base branch, detached HEAD, or merge-base
+      // failed): fall back to start-of-thread anchoring.
+      if (!mergeBaseOid) {
+        return yield* getTurnDiff({
+          threadId: input.threadId,
+          fromTurnCount: 0,
+          toTurnCount: input.toTurnCount,
+        });
+      }
+
+      const toCheckpoint = threadContext.value.checkpoints.find(
+        (checkpoint) => checkpoint.checkpointTurnCount === input.toTurnCount,
+      );
+      if (!toCheckpoint) {
+        return yield* new CheckpointUnavailableError({
+          threadId: input.threadId,
+          turnCount: input.toTurnCount,
+          detail: `Checkpoint ref is unavailable for turn ${input.toTurnCount}.`,
+        });
+      }
+      if (toCheckpoint.status === "missing") {
+        return yield* new CheckpointUnavailableError({
+          threadId: input.threadId,
+          turnCount: input.toTurnCount,
+          detail: `Checkpoint diff is not available yet for turn ${input.toTurnCount}.`,
+        });
+      }
+
+      const toCheckpointRef = toCheckpoint.checkpointRef;
+      const toExists = yield* checkpointStore.hasCheckpointRef({
+        cwd: workspaceCwd,
+        checkpointRef: toCheckpointRef,
+      });
+      if (!toExists) {
+        return yield* new CheckpointUnavailableError({
+          threadId: input.threadId,
+          turnCount: input.toTurnCount,
+          detail: `Filesystem checkpoint is unavailable for turn ${input.toTurnCount}.`,
+        });
+      }
+
+      const diff = yield* checkpointStore.diffCheckpoints({
+        cwd: workspaceCwd,
+        // Ignored when fromCommitOidOverride is set; pass a placeholder ref.
+        fromCheckpointRef: toCheckpointRef,
+        toCheckpointRef,
+        fromCommitOidOverride: mergeBaseOid,
+      });
+
+      const fullThreadDiff: OrchestrationGetFullThreadDiffResult = {
+        threadId: input.threadId,
+        fromTurnCount: 0,
+        toTurnCount: input.toTurnCount,
+        diff,
+      };
+      if (!isTurnDiffResult(fullThreadDiff)) {
+        return yield* new CheckpointInvariantError({
+          operation,
+          detail: "Computed full-thread diff result does not satisfy contract schema.",
+        });
+      }
+      return fullThreadDiff;
+    });
 
   return {
     getTurnDiff,

@@ -2083,4 +2083,83 @@ it.layer(TestLayer)("git integration", (it) => {
       }),
     );
   });
+
+  describe("resolveBaseMergeBase", () => {
+    it.effect(
+      "returns the merge-base oid between the resolved base branch and HEAD, ignoring upstream merges",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const core = yield* GitCore;
+          const initialBranch = (yield* core.listBranches({ cwd: tmp })).branches.find(
+            (branch) => branch.current,
+          )!.name;
+
+          // develop = the base branch the user forked from. Use whatever
+          // initial branch git created and rename it to "main" so the default
+          // candidate logic picks it up.
+          if (initialBranch !== "main") {
+            yield* git(tmp, ["branch", "-m", initialBranch, "main"]);
+          }
+
+          yield* writeTextFile(path.join(tmp, "main-1.txt"), "main 1\n");
+          yield* git(tmp, ["add", "main-1.txt"]);
+          yield* git(tmp, ["commit", "-m", "main 1"]);
+
+          // Branch off main, add a feature commit.
+          yield* git(tmp, ["checkout", "-b", "feature/x"]);
+          yield* writeTextFile(path.join(tmp, "feature.txt"), "feature\n");
+          yield* git(tmp, ["add", "feature.txt"]);
+          yield* git(tmp, ["commit", "-m", "feature commit"]);
+
+          // Advance main with new commits the feature branch hasn't seen.
+          yield* git(tmp, ["checkout", "main"]);
+          yield* writeTextFile(path.join(tmp, "main-2.txt"), "main 2\n");
+          yield* git(tmp, ["add", "main-2.txt"]);
+          yield* git(tmp, ["commit", "-m", "main 2"]);
+          const mainTipAfterAdvance = yield* git(tmp, ["rev-parse", "HEAD"]);
+
+          // Merge main back into feature/x — the scenario the bug report
+          // describes. After the merge, main's new tip is an ancestor of
+          // feature/x, so merge-base must equal that tip (matching GitHub PR
+          // semantics: develop's changes drop out of the diff).
+          yield* git(tmp, ["checkout", "feature/x"]);
+          yield* git(tmp, ["merge", "--no-ff", "-m", "merge main into feature", "main"]);
+
+          const mergeBase = yield* core.resolveBaseMergeBase(tmp);
+          expect(mergeBase).toBe(mainTipAfterAdvance);
+        }),
+    );
+
+    it.effect("returns null when HEAD is detached", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const headOid = yield* git(tmp, ["rev-parse", "HEAD"]);
+        yield* git(tmp, ["checkout", "--detach", headOid]);
+
+        const core = yield* GitCore;
+        const mergeBase = yield* core.resolveBaseMergeBase(tmp);
+        expect(mergeBase).toBeNull();
+      }),
+    );
+
+    it.effect("returns null when no base branch candidate exists", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const initialBranch = (yield* (yield* GitCore).listBranches({ cwd: tmp })).branches.find(
+          (branch) => branch.current,
+        )!.name;
+        // Rename the only branch to something that isn't main/master so no
+        // base branch candidate resolves.
+        yield* git(tmp, ["branch", "-m", initialBranch, "feature/solo"]);
+
+        const core = yield* GitCore;
+        const mergeBase = yield* core.resolveBaseMergeBase(tmp);
+        expect(mergeBase).toBeNull();
+      }),
+    );
+  });
 });

@@ -125,6 +125,7 @@ export function makeServerRuntimeServicesLayer() {
   const checkpointDiffQueryLayer = CheckpointDiffQueryLive.pipe(
     Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
     Layer.provideMerge(checkpointStoreLayer),
+    Layer.provide(GitCoreLive),
   );
 
   const runtimeServicesLayer = Layer.mergeAll(
