@@ -272,6 +272,7 @@ import {
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { ChatHeader } from "./chat/ChatHeader";
+import { LinuxWindowControls } from "./LinuxWindowControls";
 import { SidebarHeaderNavigationControls } from "./SidebarHeaderNavigationControls";
 import { SidebarHeaderTrigger } from "./ui/sidebar";
 import { ChatTranscriptPane } from "./chat/ChatTranscriptPane";
@@ -6730,6 +6731,8 @@ export default function ChatView({
           >
             <SidebarHeaderNavigationControls />
             <span className="text-xs text-muted-foreground/50">No active thread</span>
+            <div className="ml-auto" />
+            <LinuxWindowControls className="ml-2" />
           </div>
         )}
         <div className="flex flex-1 items-center justify-center">
@@ -7427,6 +7430,7 @@ export default function ChatView({
           onNavigateToThread={onNavigateToThread}
           onRenameThread={() => setRenameDialogOpen(true)}
         />
+        <LinuxWindowControls className="ml-2" />
       </header>
 
       <RenameThreadDialog

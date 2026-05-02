@@ -75,6 +75,21 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     isSupported: () => ipcRenderer.invoke(NOTIFICATIONS_IS_SUPPORTED_CHANNEL),
     show: (input) => ipcRenderer.invoke(NOTIFICATIONS_SHOW_CHANNEL, input),
   },
+  window: {
+    minimize: () => ipcRenderer.send("desktop:window-minimize"),
+    toggleMaximize: () => ipcRenderer.send("desktop:window-toggle-maximize"),
+    close: () => ipcRenderer.send("desktop:window-close"),
+    isMaximized: () => ipcRenderer.invoke("desktop:window-is-maximized"),
+    onMaximizeChange: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, maximized: unknown) => {
+        listener(maximized === true);
+      };
+      ipcRenderer.on("desktop:window-maximize-state", wrapped);
+      return () => {
+        ipcRenderer.removeListener("desktop:window-maximize-state", wrapped);
+      };
+    },
+  },
   server: {
     transcribeVoice: (input) => ipcRenderer.invoke(SERVER_TRANSCRIBE_VOICE_CHANNEL, input),
   },
