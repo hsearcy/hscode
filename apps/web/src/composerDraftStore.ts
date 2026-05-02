@@ -110,7 +110,7 @@ export interface QueuedComposerPlanFollowUp {
   createdAt: string;
   previewText: string;
   text: string;
-  interactionMode: "default" | "plan";
+  interactionMode: ProviderInteractionMode;
   selectedProvider: ProviderKind;
   selectedModel: string | null;
   selectedPromptEffort: string | null;
@@ -1275,10 +1275,9 @@ function normalizePersistedQueuedTurns(
     )
       ? candidate.providerOptionsForDispatch
       : undefined;
-    const runtimeMode =
-      candidate.runtimeMode === "approval-required" || candidate.runtimeMode === "full-access"
-        ? candidate.runtimeMode
-        : null;
+    const runtimeMode = Schema.is(RuntimeMode)(candidate.runtimeMode)
+      ? candidate.runtimeMode
+      : null;
     if (
       id.length === 0 ||
       createdAt.length === 0 ||
@@ -1433,11 +1432,9 @@ function normalizePersistedDraftThreads(
           typeof createdAt === "string" && createdAt.length > 0
             ? createdAt
             : new Date().toISOString(),
-        runtimeMode:
-          candidateDraftThread.runtimeMode === "approval-required" ||
-          candidateDraftThread.runtimeMode === "full-access"
-            ? candidateDraftThread.runtimeMode
-            : DEFAULT_RUNTIME_MODE,
+        runtimeMode: Schema.is(RuntimeMode)(candidateDraftThread.runtimeMode)
+          ? candidateDraftThread.runtimeMode
+          : DEFAULT_RUNTIME_MODE,
         interactionMode:
           candidateDraftThread.interactionMode === "plan" ||
           candidateDraftThread.interactionMode === "default"
@@ -1530,11 +1527,9 @@ function normalizePersistedDraftsByThreadId(
         })
       : [];
     const queuedTurns = normalizePersistedQueuedTurns(draftCandidate.queuedTurns);
-    const runtimeMode =
-      draftCandidate.runtimeMode === "approval-required" ||
-      draftCandidate.runtimeMode === "full-access"
-        ? draftCandidate.runtimeMode
-        : null;
+    const runtimeMode = Schema.is(RuntimeMode)(draftCandidate.runtimeMode)
+      ? draftCandidate.runtimeMode
+      : null;
     const interactionMode =
       draftCandidate.interactionMode === "plan" || draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
@@ -2669,8 +2664,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
-        const nextRuntimeMode =
-          runtimeMode === "approval-required" || runtimeMode === "full-access" ? runtimeMode : null;
+        const nextRuntimeMode = Schema.is(RuntimeMode)(runtimeMode) ? runtimeMode : null;
         set((state) => {
           const existing = state.draftsByThreadId[threadId];
           if (!existing && nextRuntimeMode === null) {

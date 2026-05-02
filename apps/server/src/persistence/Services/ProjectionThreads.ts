@@ -11,6 +11,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   OrchestrationThreadPullRequest,
+  TerminalCliKind,
   ThreadHandoff,
   ProjectId,
   ProviderInteractionMode,
@@ -56,6 +57,13 @@ export const ProjectionThread = Schema.Struct({
     Schema.withDecodingDefault(() => null),
   ),
   deletedAt: Schema.NullOr(IsoDateTime),
+  cliKind: Schema.optional(Schema.NullOr(TerminalCliKind)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  cliSessionId: Schema.optional(Schema.NullOr(Schema.String)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  cliLaunchedOnce: Schema.optional(Schema.Boolean).pipe(Schema.withDecodingDefault(() => false)),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
 
@@ -106,6 +114,13 @@ export interface ProjectionThreadRepositoryShape {
    */
   readonly deleteById: (
     input: DeleteProjectionThreadInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Mark that the CLI was launched at least once for a terminal-cli thread.
+   */
+  readonly markCliLaunchedOnce: (
+    input: GetProjectionThreadInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 

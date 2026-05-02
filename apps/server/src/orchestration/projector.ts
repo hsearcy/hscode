@@ -313,6 +313,8 @@ export function projectEvent(
             archivedAt: null,
             deletedAt: null,
             handoff: payload.handoff,
+            ...(payload.cliKind !== undefined ? { cliKind: payload.cliKind } : {}),
+            ...(payload.cliSessionId !== undefined ? { cliSessionId: payload.cliSessionId } : {}),
             messages: [],
             activities: [],
             checkpoints: [],

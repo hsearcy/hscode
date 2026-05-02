@@ -69,6 +69,7 @@ import {
   createAllThreadsSelector,
   createThreadExistsSelector,
   createThreadProjectIdSelector,
+  createThreadSelector,
 } from "../storeSelectors";
 import { Button } from "../components/ui/button";
 import {
@@ -1753,8 +1754,10 @@ function ChatThreadRouteView() {
     [threadId],
   );
   const threadExistsSelector = useMemo(() => createThreadExistsSelector(threadId), [threadId]);
+  const threadSelector = useMemo(() => createThreadSelector(threadId), [threadId]);
   const threadProjectId: ProjectId | null = useStore(threadProjectIdSelector);
   const threadExists = useStore(threadExistsSelector);
+  const activeThread = useStore(threadSelector);
   const draftThreadState = useComposerDraftStore(
     (store) => store.draftThreadsByThreadId[threadId] ?? null,
   );

@@ -61,6 +61,7 @@ import {
   ThreadId,
   type GitStatusResult,
   type ResolvedKeybindingsConfig,
+  type TerminalCliKind,
 } from "@t3tools/contracts";
 import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -372,6 +373,29 @@ function ProviderGlyph({ provider, className }: { provider: ProviderKind; classN
 }
 function WorktreeBadgeGlyph({ className }: { className?: string }) {
   return <LuSplit aria-hidden="true" className={cn("rotate-90", className)} />;
+}
+
+function TerminalCliGlyph({ cliKind }: { cliKind: TerminalCliKind | null }) {
+  const containerClass = "relative inline-flex size-3.5 shrink-0 items-center justify-center";
+  if (cliKind === "claude") {
+    return (
+      <span className={containerClass}>
+        <ClaudeAI aria-hidden="true" className="size-3.5 text-foreground opacity-80" />
+      </span>
+    );
+  }
+  if (cliKind === "codex") {
+    return (
+      <span className={containerClass}>
+        <OpenAI aria-hidden="true" className="size-3.5 text-muted-foreground/60" />
+      </span>
+    );
+  }
+  return (
+    <span className={containerClass}>
+      <TerminalIcon aria-hidden="true" className="size-3.5 text-teal-600/85" />
+    </span>
+  );
 }
 
 function resolveWorktreeBadgeLabel(
@@ -3878,6 +3902,8 @@ export default function Sidebar() {
           </div>
           {threadEntryPoint === "terminal" ? (
             <TerminalIcon aria-hidden="true" className="size-3.5 shrink-0 text-teal-600/85" />
+          ) : thread.interactionMode === "terminal-cli" ? (
+            <TerminalCliGlyph cliKind={thread.cliKind ?? null} />
           ) : (
             <ProviderAvatarWithTerminal
               provider={thread.modelSelection.provider}

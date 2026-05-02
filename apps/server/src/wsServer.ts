@@ -107,6 +107,7 @@ import {
 } from "@t3tools/shared/threadWorkspace";
 import { getProviderUsageSnapshot } from "./providerUsageSnapshot";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
+import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -576,7 +577,8 @@ export type ServerCoreRuntimeServices =
   | ProviderService
   | ProviderDiscoveryService
   | ProviderAdapterRegistry
-  | ProviderHealth;
+  | ProviderHealth
+  | ProjectionThreadRepository;
 
 export type ServerRuntimeServices =
   | ServerCoreRuntimeServices
@@ -686,6 +688,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const providerHealth = yield* ProviderHealth;
   const providerDiscoveryService = yield* ProviderDiscoveryService;
   const providerAdapterRegistry = yield* ProviderAdapterRegistry;
+  const projectionThreadRepository = yield* ProjectionThreadRepository;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -2062,7 +2065,46 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.terminalOpen: {
         const body = stripRequestTag(request.body);
         terminalTitleTracker.reset(body.threadId, body.terminalId ?? DEFAULT_TERMINAL_ID);
-        return yield* terminalManager.open(body);
+        const snapshot = yield* terminalManager.open(body);
+        yield* Effect.gen(function* () {
+          const readModel = yield* orchestrationEngine.getReadModel();
+          const thread = readModel.threads.find((t) => t.id === body.threadId);
+          if (!thread || thread.interactionMode !== "terminal-cli") {
+            return;
+          }
+          const cliKind = thread.cliKind;
+          const cliSessionId = thread.cliSessionId;
+          if (!cliKind) {
+            return;
+          }
+          const threadRow = yield* projectionThreadRepository.getById({
+            threadId: ThreadId.makeUnsafe(body.threadId),
+          });
+          if (Option.isNone(threadRow)) {
+            return;
+          }
+          const row = threadRow.value;
+          const launched = row.cliLaunchedOnce;
+          let initialCommand: string;
+          if (cliKind === "claude") {
+            initialCommand = launched
+              ? `claude --resume ${cliSessionId}`
+              : `claude --session-id ${cliSessionId}`;
+          } else {
+            initialCommand = launched ? "codex resume --last" : "codex";
+          }
+          yield* terminalManager.write({
+            threadId: body.threadId,
+            terminalId: body.terminalId ?? DEFAULT_TERMINAL_ID,
+            data: `${initialCommand}\r`,
+          });
+          if (!launched) {
+            yield* projectionThreadRepository.markCliLaunchedOnce({
+              threadId: ThreadId.makeUnsafe(body.threadId),
+            });
+          }
+        }).pipe(Effect.catch(() => Effect.void));
+        return snapshot;
       }
 
       case WS_METHODS.terminalWrite: {
@@ -2228,9 +2270,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
     const result = yield* Effect.exit(routeRequest(ws, request.success));
     if (Exit.isFailure(result)) {
+      const errors = Cause.prettyErrors(result.cause);
+      const failureMessage =
+        errors.length > 0
+          ? errors.map((err) => err.message).join("\n")
+          : Cause.pretty(result.cause);
       return yield* sendWsResponse({
         id: request.success.id,
-        error: { message: Cause.pretty(result.cause) },
+        error: { message: failureMessage },
       });
     }
 

@@ -282,6 +282,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           forkSourceThreadId: null,
           lastKnownPr: command.lastKnownPr,
           handoff: null,
+          ...(command.cliKind !== undefined ? { cliKind: command.cliKind } : {}),
+          ...(command.interactionMode === "terminal-cli"
+            ? {
+                cliSessionId: command.cliSessionId ?? crypto.randomUUID(),
+              }
+            : {}),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },

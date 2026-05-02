@@ -275,6 +275,7 @@ import { ChatHeader } from "./chat/ChatHeader";
 import { SidebarHeaderNavigationControls } from "./SidebarHeaderNavigationControls";
 import { SidebarHeaderTrigger } from "./ui/sidebar";
 import { ChatTranscriptPane } from "./chat/ChatTranscriptPane";
+import ThreadTerminalCliPane from "./ThreadTerminalCliPane";
 import { buildTurnDiffSummaryByAssistantMessageId } from "./chat/MessagesTimeline.logic";
 import { ComposerSlashStatusDialog } from "./chat/ComposerSlashStatusDialog";
 import { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -5618,9 +5619,11 @@ export default function ChatView({
       if (queuedTurn.kind === "chat") {
         return onSendRef.current(undefined, dispatchMode, queuedTurn);
       }
+      const planInteractionMode: "default" | "plan" =
+        queuedTurn.interactionMode === "plan" ? "plan" : "default";
       return onSubmitPlanFollowUpRef.current({
         text: queuedTurn.text,
-        interactionMode: queuedTurn.interactionMode,
+        interactionMode: planInteractionMode,
         dispatchMode,
         queuedTurn,
       });
@@ -5827,6 +5830,58 @@ export default function ChatView({
     syncServerReadModel,
     selectedModel,
   ]);
+
+  const handleCreateCliThread = useCallback(
+    async (cliKind: "claude" | "codex") => {
+      const api = readNativeApi();
+      if (!api || !activeProject) {
+        return;
+      }
+      const createdAt = new Date().toISOString();
+      const nextThreadId = newThreadId();
+      const cliLabel = cliKind === "claude" ? "Claude Code" : "Codex";
+      const title = `${cliLabel} — ${activeProjectDisplayName ?? activeProject.name}`;
+      await api.orchestration
+        .dispatchCommand({
+          type: "thread.create",
+          commandId: newCommandId(),
+          threadId: nextThreadId,
+          projectId: activeProject.id,
+          title,
+          modelSelection: selectedModelSelection,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: "terminal-cli",
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+          cliKind,
+          createdAt,
+        })
+        .then(() => api.orchestration.getSnapshot())
+        .then((snapshot) => {
+          syncServerReadModel(snapshot);
+          return navigate({
+            to: "/$threadId",
+            params: { threadId: nextThreadId },
+          });
+        })
+        .catch((err) => {
+          toastManager.add({
+            type: "error",
+            title: "Could not create CLI thread",
+            description:
+              err instanceof Error ? err.message : "An error occurred while creating the thread.",
+          });
+        });
+    },
+    [
+      activeProject,
+      activeProjectDisplayName,
+      navigate,
+      selectedModelSelection,
+      syncServerReadModel,
+    ],
+  );
 
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
@@ -6765,7 +6820,7 @@ export default function ChatView({
   // follow-up prompts and normal chat mode stay visually in sync.
   const taskListAboveComposer = Boolean(activeTaskList && !planSidebarOpen);
 
-  const composerSection = secondaryChromeReady ? (
+  const _composerSection = secondaryChromeReady ? (
     <>
       {activeTaskList && !planSidebarOpen ? (
         <div className="pointer-events-none mx-auto w-full max-w-3xl">
@@ -7406,7 +7461,9 @@ export default function ChatView({
               terminalWorkspaceTerminalTabActive ? "pointer-events-none invisible" : "",
             )}
           >
-            {isCenteredEmptyLanding ? (
+            {activeThread?.interactionMode === "terminal-cli" ? (
+              <ThreadTerminalCliPane threadId={activeThread.id} />
+            ) : isCenteredEmptyLanding ? (
               <div className="chat-pane-enter flex flex-1 items-center justify-center px-3 sm:px-5">
                 <div className="flex w-full max-w-3xl flex-col justify-center">
                   <div className="flex flex-col items-center gap-4 px-6 pb-5 text-center select-none">
@@ -7432,14 +7489,22 @@ export default function ChatView({
                       )}
                     </h2>
                   </div>
-                  {composerSection}
-                  {isGitRepo ? (
-                    <BranchToolbar {...branchToolbarProps} />
-                  ) : !isEmptyChatLanding ? (
-                    <div className="mx-auto flex w-full max-w-3xl items-center justify-end px-3 pb-3 pt-1">
-                      <RuntimeUsageControls {...runtimeUsageControlsProps} />
-                    </div>
-                  ) : null}
+                  <div className="mx-auto mb-3 flex w-full max-w-3xl items-center justify-center gap-2 px-3">
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={() => void handleCreateCliThread("claude")}
+                    >
+                      Claude Code
+                    </button>
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={() => void handleCreateCliThread("codex")}
+                    >
+                      Codex
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (

@@ -396,6 +396,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    cliKind: thread.cliKind ?? null,
     error: thread.error,
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt ?? null,
@@ -1461,6 +1462,7 @@ function normalizeThreadFromReadModel(
     modelSelection,
     runtimeMode: incoming.runtimeMode,
     interactionMode: incoming.interactionMode,
+    cliKind: incoming.cliKind ?? null,
     session,
     messages,
     proposedPlans,
@@ -1555,6 +1557,7 @@ function normalizeThreadShellSnapshot(
     modelSelection,
     runtimeMode: incoming.runtimeMode,
     interactionMode: incoming.interactionMode,
+    cliKind: incoming.cliKind ?? null,
     error,
     createdAt: incoming.createdAt,
     archivedAt: incoming.archivedAt ?? null,
@@ -1864,6 +1867,7 @@ function sidebarThreadSummariesEqual(
     left.title === right.title &&
     left.modelSelection === right.modelSelection &&
     left.interactionMode === right.interactionMode &&
+    (left.cliKind ?? null) === (right.cliKind ?? null) &&
     left.envMode === right.envMode &&
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
@@ -1901,6 +1905,7 @@ function buildSidebarThreadSummary(
     title: thread.title,
     modelSelection: thread.modelSelection,
     interactionMode: thread.interactionMode,
+    cliKind: thread.cliKind ?? null,
     envMode: thread.envMode,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
