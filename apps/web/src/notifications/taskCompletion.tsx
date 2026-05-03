@@ -11,6 +11,8 @@ import { isElectron } from "../env";
 import { useStore } from "../store";
 import { createAllThreadsSelector } from "../storeSelectors";
 import { useTerminalStateStore } from "../terminalStateStore";
+import { useSplitViewStore } from "../splitViewStore";
+import { resolvePreferredSplitForCommand } from "../threadActivation.logic";
 import type { Thread } from "../types";
 import {
   buildTerminalAttentionCopy,
@@ -69,9 +71,25 @@ interface ThreadNotificationCopy {
   body: string;
 }
 
-// Notification opens are generic thread activations, so they clear splitViewId
-// instead of resurrecting a hidden split pairing.
+// Restore the split pane the thread already lives in (if any) so opening from
+// a notification matches what clicking the sidebar row would do — otherwise
+// fall back to single-pane chat.
 function focusThread(threadId: Thread["id"], navigate: ReturnType<typeof useNavigate>): void {
+  const splitState = useSplitViewStore.getState();
+  const preferredSplit = resolvePreferredSplitForCommand({
+    activeSplitView: null,
+    splitViewsById: splitState.splitViewsById,
+    threadId,
+  });
+  if (preferredSplit) {
+    splitState.setFocusedPane(preferredSplit.splitViewId, preferredSplit.paneId);
+    void navigate({
+      to: "/$threadId",
+      params: { threadId },
+      search: (previous) => ({ ...previous, splitViewId: preferredSplit.splitViewId }),
+    });
+    return;
+  }
   void navigate({
     to: "/$threadId",
     params: { threadId },

@@ -1266,6 +1266,28 @@ export default function Sidebar() {
       return next;
     });
   }, []);
+  // Roll up each thread's terminal agent states into a single "needs your
+  // eyes" signal: attention (permission request) wins over review (turn done).
+  const terminalAttentionByThreadId = useMemo(() => {
+    const result: Record<string, "attention" | "review"> = {};
+    for (const [threadId, state] of Object.entries(terminalStateByThreadId)) {
+      let worst: "attention" | "review" | null = null;
+      for (const value of Object.values(state.terminalAttentionStatesById)) {
+        if (value === "attention") {
+          worst = "attention";
+          break;
+        }
+        if (value === "review") {
+          worst = "review";
+        }
+      }
+      if (worst) {
+        result[threadId] = worst;
+      }
+    }
+    return result;
+  }, [terminalStateByThreadId]);
+
   const resolveThreadStatusForSidebar = useCallback(
     (thread: SidebarThreadSummary) =>
       resolveThreadStatusPill({
@@ -1275,8 +1297,9 @@ export default function Sidebar() {
         },
         hasPendingApprovals: thread.hasPendingApprovals,
         hasPendingUserInput: thread.hasPendingUserInput,
+        terminalAttentionState: terminalAttentionByThreadId[thread.id] ?? null,
       }),
-    [dismissedThreadStatusKeyByThreadId],
+    [dismissedThreadStatusKeyByThreadId, terminalAttentionByThreadId],
   );
 
   useEffect(() => {

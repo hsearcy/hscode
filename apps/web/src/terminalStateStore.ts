@@ -1254,6 +1254,7 @@ interface TerminalStateStoreState {
     terminalIds: readonly string[],
   ) => void;
   clearTerminalState: (threadId: ThreadId) => void;
+  clearThreadTerminalAttention: (threadId: ThreadId) => void;
   removeOrphanedTerminalStates: (activeThreadIds: Set<ThreadId>) => void;
 }
 
@@ -1345,6 +1346,14 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
           ),
         clearTerminalState: (threadId) =>
           updateTerminal(threadId, () => createDefaultThreadTerminalState()),
+        clearThreadTerminalAttention: (threadId) =>
+          updateTerminal(threadId, (state) => {
+            const normalized = normalizeThreadTerminalState(state);
+            if (Object.keys(normalized.terminalAttentionStatesById).length === 0) {
+              return normalized;
+            }
+            return { ...normalized, terminalAttentionStatesById: {} };
+          }),
         removeOrphanedTerminalStates: (activeThreadIds) =>
           set((state) => {
             const orphanedIds = Object.keys(state.terminalStateByThreadId).filter(

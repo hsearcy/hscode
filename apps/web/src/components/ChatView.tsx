@@ -932,6 +932,9 @@ export default function ChatView({
   const storeSetTerminalHeight = useTerminalStateStore((s) => s.setTerminalHeight);
   const storeSetTerminalMetadata = useTerminalStateStore((s) => s.setTerminalMetadata);
   const storeSetTerminalActivity = useTerminalStateStore((s) => s.setTerminalActivity);
+  const storeClearThreadTerminalAttention = useTerminalStateStore(
+    (s) => s.clearThreadTerminalAttention,
+  );
   const storeSplitTerminalLeft = useTerminalStateStore((s) => s.splitTerminalLeft);
   const storeSplitTerminalRight = useTerminalStateStore((s) => s.splitTerminalRight);
   const storeSplitTerminalDown = useTerminalStateStore((s) => s.splitTerminalDown);
@@ -1229,6 +1232,15 @@ export default function ChatView({
     latestTurnSettled,
     markThreadVisited,
   ]);
+
+  // Terminal-thread sidebar attention/review pills should disappear the moment
+  // the user is actually looking at the pane — including stale "attention" state
+  // left over from PreToolUse-style hooks that never paired with a clearing event.
+  useEffect(() => {
+    if (!activeThread?.id) return;
+    if (surfaceMode === "split" && !isFocusedPane) return;
+    storeClearThreadTerminalAttention(activeThread.id);
+  }, [activeThread?.id, isFocusedPane, storeClearThreadTerminalAttention, surfaceMode]);
 
   const sessionProvider = activeThread?.session?.provider ?? null;
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
