@@ -22,6 +22,7 @@ import {
   deriveTerminalTitleSignalIdentity,
   terminalCliKindFromValue,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
+  T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_KIND_ENV_KEY,
   type TerminalActivityState,
   type TerminalAgentHookEventType,
@@ -470,8 +471,50 @@ function shouldStripCsiSequence(body: string, finalByte: string): boolean {
 
 function shouldStripOscSequence(content: string): boolean {
   return (
-    /^(10|11|12);(?:\?|rgb:)/.test(content) || content.startsWith(T3CODE_TERMINAL_HOOK_OSC_PREFIX)
+    /^(10|11|12);(?:\?|rgb:)/.test(content) ||
+    content.startsWith(T3CODE_TERMINAL_HOOK_OSC_PREFIX) ||
+    content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)
   );
+}
+
+interface ClaudeSessionMetaSignal {
+  sessionId: string;
+  summary: string | null;
+}
+
+function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSignal | null {
+  if (!content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)) {
+    return null;
+  }
+  const encoded = content.slice(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX.length).trim();
+  if (encoded.length === 0) {
+    return null;
+  }
+  let json: string;
+  try {
+    json = Buffer.from(encoded, "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+  const record = parsed as { sessionId?: unknown; summary?: unknown };
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  if (sessionId.length === 0) {
+    return null;
+  }
+  const summaryRaw = typeof record.summary === "string" ? record.summary.trim() : "";
+  return {
+    sessionId,
+    summary: summaryRaw.length > 0 ? summaryRaw : null,
+  };
 }
 
 function extractOscTitle(content: string): string | null {
@@ -540,12 +583,14 @@ function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string;
   titleSignals: string[];
   hookEvents: TerminalAgentHookEventType[];
+  claudeMetaSignals: ClaudeSessionMetaSignal[];
 } {
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
   const titleSignals: string[] = [];
   const hookEvents: TerminalAgentHookEventType[] = [];
+  const claudeMetaSignals: ClaudeSessionMetaSignal[] = [];
 
   const append = (value: string) => {
     visibleText += value;
@@ -562,6 +607,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
 
@@ -585,6 +631,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
+            claudeMetaSignals,
           };
         }
         continue;
@@ -603,6 +650,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
+            claudeMetaSignals,
           };
         }
         const sequence = input.slice(index, terminatorIndex);
@@ -615,6 +663,10 @@ function sanitizeTerminalHistoryChunk(
           const titleSignal = extractOscTitle(content);
           if (titleSignal) {
             titleSignals.push(titleSignal);
+          }
+          const claudeMeta = extractClaudeSessionMetaSignal(content);
+          if (claudeMeta) {
+            claudeMetaSignals.push(claudeMeta);
           }
         }
         if (nextCodePoint !== 0x5d || !shouldStripOscSequence(content)) {
@@ -631,6 +683,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       append(input.slice(index, escapeSequenceEndIndex));
@@ -658,6 +711,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       continue;
@@ -671,6 +725,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       const sequence = input.slice(index, terminatorIndex);
@@ -678,6 +733,10 @@ function sanitizeTerminalHistoryChunk(
       const hookEvent = extractOscHookEvent(content);
       if (hookEvent) {
         hookEvents.push(hookEvent);
+      }
+      const claudeMeta = codePoint === 0x9d ? extractClaudeSessionMetaSignal(content) : null;
+      if (claudeMeta) {
+        claudeMetaSignals.push(claudeMeta);
       }
       if (codePoint === 0x9d) {
         const titleSignal = extractOscTitle(content);
@@ -696,7 +755,13 @@ function sanitizeTerminalHistoryChunk(
     index += 1;
   }
 
-  return { visibleText, pendingControlSequence: "", titleSignals, hookEvents };
+  return {
+    visibleText,
+    pendingControlSequence: "",
+    titleSignals,
+    hookEvents,
+    claudeMetaSignals,
+  };
 }
 
 function legacySafeThreadId(threadId: string): string {
@@ -1327,6 +1392,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         session.hasRunningSubprocess = nextManagedAgentRunning;
         this.emitActivityEvent(session);
       }
+    }
+    for (const claudeMeta of sanitized.claudeMetaSignals) {
+      this.emitEvent({
+        type: "claude-session",
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+        createdAt: new Date().toISOString(),
+        sessionId: claudeMeta.sessionId,
+        summary: claudeMeta.summary,
+      });
     }
     const titleSignalCliKind =
       sanitized.titleSignals

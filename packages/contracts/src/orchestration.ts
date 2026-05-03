@@ -755,6 +755,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   handoff: Schema.optional(Schema.NullOr(ThreadHandoff)),
   lastKnownPr: Schema.optional(Schema.NullOr(OrchestrationThreadPullRequest)),
+  cliSessionId: Schema.optional(TrimmedNonEmptyString),
 });
 
 const ThreadRuntimeModeSetCommand = Schema.Struct({
@@ -1210,6 +1211,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   handoff: Schema.optional(Schema.NullOr(ThreadHandoff)),
   lastKnownPr: Schema.optional(Schema.NullOr(OrchestrationThreadPullRequest)),
+  cliSessionId: Schema.optional(TrimmedNonEmptyString),
   updatedAt: IsoDateTime,
 });
 

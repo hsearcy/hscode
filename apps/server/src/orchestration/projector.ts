@@ -418,6 +418,7 @@ export function projectEvent(
               ...(payload.subagentRole !== undefined ? { subagentRole: payload.subagentRole } : {}),
               ...(payload.lastKnownPr !== undefined ? { lastKnownPr: payload.lastKnownPr } : {}),
               ...(payload.handoff !== undefined ? { handoff: payload.handoff } : {}),
+              ...(payload.cliSessionId !== undefined ? { cliSessionId: payload.cliSessionId } : {}),
               updatedAt: payload.updatedAt,
             }),
           };

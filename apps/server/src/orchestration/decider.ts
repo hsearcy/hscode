@@ -620,6 +620,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.subagentRole !== undefined ? { subagentRole: command.subagentRole } : {}),
           ...(command.handoff !== undefined ? { handoff: command.handoff } : {}),
           ...(command.lastKnownPr !== undefined ? { lastKnownPr: command.lastKnownPr } : {}),
+          ...(command.cliSessionId !== undefined ? { cliSessionId: command.cliSessionId } : {}),
           updatedAt: occurredAt,
         },
       };

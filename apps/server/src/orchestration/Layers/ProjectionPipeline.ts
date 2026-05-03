@@ -682,6 +682,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               ? { lastKnownPr: event.payload.lastKnownPr }
               : {}),
             ...(event.payload.handoff !== undefined ? { handoff: event.payload.handoff } : {}),
+            ...(event.payload.cliSessionId !== undefined
+              ? { cliSessionId: event.payload.cliSessionId }
+              : {}),
             updatedAt: event.payload.updatedAt,
           });
           return;

@@ -147,6 +147,13 @@ const TerminalActivityEvent = Schema.Struct({
   ),
 });
 
+const TerminalClaudeSessionEvent = Schema.Struct({
+  ...TerminalEventBaseSchema.fields,
+  type: Schema.Literal("claude-session"),
+  sessionId: Schema.String.check(Schema.isNonEmpty()),
+  summary: Schema.NullOr(Schema.String),
+});
+
 export const TerminalEvent = Schema.Union([
   TerminalStartedEvent,
   TerminalOutputEvent,
@@ -155,5 +162,6 @@ export const TerminalEvent = Schema.Union([
   TerminalClearedEvent,
   TerminalRestartedEvent,
   TerminalActivityEvent,
+  TerminalClaudeSessionEvent,
 ]);
 export type TerminalEvent = typeof TerminalEvent.Type;

@@ -107,6 +107,10 @@ import {
 } from "@t3tools/shared/threadWorkspace";
 import { getProviderUsageSnapshot } from "./providerUsageSnapshot";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
+import {
+  defaultTerminalTitleForCliKind,
+  isGenericTerminalThreadTitle,
+} from "@t3tools/shared/terminalThreads";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 
 /**
@@ -1443,10 +1447,72 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   >();
   const runPromise = Effect.runPromiseWith(runtimeServices);
 
+  const CLAUDE_SUMMARY_TITLE_MAX = 48;
+  const isAutoDerivedClaudeTerminalTitle = (title: string | null | undefined): boolean => {
+    if (isGenericTerminalThreadTitle(title)) {
+      return true;
+    }
+    const normalized = (title ?? "").trim().toLowerCase();
+    if (normalized.length === 0) {
+      return true;
+    }
+    const claudeBase = defaultTerminalTitleForCliKind("claude").toLowerCase();
+    if (normalized === claudeBase) {
+      return true;
+    }
+    // Also treat "<base> - <suffix>" / em-dash / en-dash variants as auto-derived,
+    // so threads displayed as "Claude Code - dpcode" still get renamed by Claude summaries.
+    return new RegExp(`^${claudeBase}\\s+[\\-\\u2013\\u2014]\\s+\\S`, "u").test(normalized);
+  };
+  const applyClaudeSessionMeta = Effect.fnUntraced(function* (input: {
+    threadId: string;
+    sessionId: string;
+    summary: string | null;
+  }) {
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return;
+    }
+    const sessionIdChanged = thread.cliSessionId !== input.sessionId;
+    const trimmedSummary = input.summary?.trim() ?? "";
+    const truncatedSummary =
+      trimmedSummary.length > CLAUDE_SUMMARY_TITLE_MAX
+        ? `${trimmedSummary.slice(0, CLAUDE_SUMMARY_TITLE_MAX - 1).trimEnd()}…`
+        : trimmedSummary;
+    const shouldUpdateTitle =
+      truncatedSummary.length > 0 &&
+      truncatedSummary !== thread.title &&
+      isAutoDerivedClaudeTerminalTitle(thread.title);
+    if (!sessionIdChanged && !shouldUpdateTitle) {
+      return;
+    }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+      threadId: ThreadId.makeUnsafe(input.threadId),
+      ...(sessionIdChanged ? { cliSessionId: input.sessionId } : {}),
+      ...(shouldUpdateTitle ? { title: truncatedSummary } : {}),
+    });
+  });
+
   const unsubscribeTerminalEvents = yield* terminalManager.subscribe(
     (event) => void Effect.runPromise(pushBus.publishAll(WS_CHANNELS.terminalEvent, event)),
   );
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
+  const unsubscribeClaudeSessionEvents = yield* terminalManager.subscribe((event) => {
+    if (event.type !== "claude-session") {
+      return;
+    }
+    void runPromise(
+      applyClaudeSessionMeta({
+        threadId: event.threadId,
+        sessionId: event.sessionId,
+        summary: event.summary,
+      }).pipe(Effect.catchCause(() => Effect.void)),
+    );
+  });
+  yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeClaudeSessionEvents()));
   yield* readiness.markTerminalSubscriptionsReady;
 
   yield* Effect.addFinalizer(() =>
