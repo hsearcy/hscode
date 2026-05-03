@@ -134,7 +134,10 @@ function showThreadToast(
   navigate: ReturnType<typeof useNavigate>,
 ): void {
   const { body, title } = copy;
-  toastManager.add({
+  // Capture the toast id so the Open action can dismiss the toast even when
+  // the navigate is a no-op (user is already on the thread).
+  let toastId: ReturnType<typeof toastManager.add> | null = null;
+  toastId = toastManager.add({
     type: tone,
     title,
     description: body,
@@ -145,7 +148,15 @@ function showThreadToast(
     },
     actionProps: {
       children: "Open",
-      onClick: () => focusThread(threadId, navigate),
+      onClick: () => {
+        focusThread(threadId, navigate);
+        // Mirror the focus-clears-pill behaviour so the toast and the sidebar
+        // pill go away together, and dismiss the toast unconditionally.
+        useTerminalStateStore.getState().clearThreadTerminalAttention(threadId);
+        if (toastId !== null) {
+          toastManager.close(toastId);
+        }
+      },
     },
   });
 }
@@ -242,15 +253,22 @@ export function TaskCompletionNotifications() {
       }
     }
 
+    const threadTitleById = new Map<Thread["id"], string>(
+      threads.map((thread) => [thread.id, thread.title ?? ""]),
+    );
+
     for (const completion of terminalCompletions) {
-      const copy = buildTerminalCompletionCopy(completion);
+      const copy = buildTerminalCompletionCopy(
+        completion,
+        threadTitleById.get(completion.threadId),
+      );
       if (shouldAttemptSystemNotification) {
         void showSystemThreadNotification(copy, completion.threadId, navigate);
       }
     }
 
     for (const candidate of terminalAttentionCandidates) {
-      const copy = buildTerminalAttentionCopy(candidate);
+      const copy = buildTerminalAttentionCopy(candidate, threadTitleById.get(candidate.threadId));
       if (settings.enableTaskCompletionToasts) {
         showThreadToast(copy, candidate.threadId, "warning", navigate);
       }
