@@ -865,6 +865,7 @@ function DeferredChatView(props: {
   deferMount: boolean;
   surfaceMode: "single" | "split";
   isFocusedPane: boolean;
+  showWindowControls?: boolean;
   panelState: SplitViewPanePanelState;
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
@@ -914,6 +915,7 @@ function DeferredChatView(props: {
       paneScopeId={props.paneScopeId}
       surfaceMode={props.surfaceMode}
       isFocusedPane={props.isFocusedPane}
+      showWindowControls={props.showWindowControls ?? true}
       panelState={props.panelState}
       onToggleDiffPanel={props.onToggleDiff}
       onToggleBrowserPanel={props.onToggleBrowser}
@@ -931,6 +933,7 @@ function SplitPaneSurface(props: {
   threadId: ThreadIdType | null;
   panelState: SplitViewPanePanelState;
   isFocused: boolean;
+  showWindowControls: boolean;
   deferChatMount: boolean;
   canDropInDirection: (direction: SplitDirection) => boolean;
   excludedThreadIds: ReadonlySet<ThreadIdType>;
@@ -1002,6 +1005,7 @@ function SplitPaneSurface(props: {
               deferMount={props.deferChatMount}
               surfaceMode="split"
               isFocusedPane={props.isFocused}
+              showWindowControls={props.showWindowControls}
               panelState={props.panelState}
               onToggleDiff={props.onToggleDiff}
               onToggleBrowser={props.onToggleBrowser}
@@ -1379,6 +1383,17 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
     });
   };
 
+  // Window controls live in the chat header. In split mode every pane has a
+  // header, so we only render them in the topmost-rightmost leaf to avoid
+  // duplicating the controls across panes.
+  const findTopRightLeafId = (root: Pane): PaneId => {
+    if (root.kind === "leaf") {
+      return root.id;
+    }
+    return findTopRightLeafId(root.direction === "horizontal" ? root.second : root.first);
+  };
+  const topRightPaneId = findTopRightLeafId(activeSplitView.root);
+
   const renderLeaf = ({ leaf }: { leaf: LeafPane }): ReactNode => {
     const isFocused = leaf.id === activeSplitView.focusedPaneId;
     const excluded = new Set<ThreadIdType>(splitThreadIds);
@@ -1390,6 +1405,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
         threadId={leaf.threadId}
         panelState={leaf.panel}
         isFocused={isFocused}
+        showWindowControls={leaf.id === topRightPaneId}
         deferChatMount={false}
         canDropInDirection={(direction) =>
           canSubdividePane(activeSplitView.root, leaf.id, direction)

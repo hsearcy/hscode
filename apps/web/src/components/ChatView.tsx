@@ -674,6 +674,7 @@ interface ChatViewProps {
   paneScopeId?: string;
   surfaceMode?: "single" | "split";
   isFocusedPane?: boolean;
+  showWindowControls?: boolean;
   panelState?: SplitViewPanePanelState;
   onToggleDiffPanel?: () => void;
   onToggleBrowserPanel?: () => void;
@@ -688,6 +689,7 @@ export default function ChatView({
   paneScopeId = "single",
   surfaceMode = "single",
   isFocusedPane = true,
+  showWindowControls = true,
   panelState,
   onToggleDiffPanel,
   onToggleBrowserPanel,
@@ -6732,7 +6734,7 @@ export default function ChatView({
             <SidebarHeaderNavigationControls />
             <span className="text-xs text-muted-foreground/50">No active thread</span>
             <div className="ml-auto" />
-            <LinuxWindowControls className="ml-2" />
+            {showWindowControls && <LinuxWindowControls className="ml-2" />}
           </div>
         )}
         <div className="flex flex-1 items-center justify-center">
@@ -7430,7 +7432,7 @@ export default function ChatView({
           onNavigateToThread={onNavigateToThread}
           onRenameThread={() => setRenameDialogOpen(true)}
         />
-        <LinuxWindowControls className="ml-2" />
+        {showWindowControls && <LinuxWindowControls className="ml-2" />}
       </header>
 
       <RenameThreadDialog
