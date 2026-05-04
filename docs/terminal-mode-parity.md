@@ -1,25 +1,26 @@
 # Terminal-Mode CLI Parity Tracker
 
-Threads now run a real PTY hosting an interactive CLI agent (Claude Code today, Codex next). The plumbing — OSC hook protocol, terminal manager, sidebar pills, checkpoint dispatch — is generic. The *meta extraction* (titles, session ids, working dirs, transcripts) is currently shaped around Claude's on-disk layout.
+Threads now run a real PTY hosting an interactive CLI agent (Claude Code today, Codex next). The plumbing — OSC hook protocol, terminal manager, sidebar pills, checkpoint dispatch — is generic. The _meta extraction_ (titles, session ids, working dirs, transcripts) is currently shaped around Claude's on-disk layout.
 
 This document lists what is built per CLI so we know what still needs Codex parity.
 
 ## Status legend
+
 - ✅ implemented
 - ⚠️ partially implemented (notes)
 - ❌ not yet built
 
 ## Feature matrix
 
-| Feature | Claude | Codex | Notes |
-|---|---|---|---|
-| OSC hook events (Start / Stop / PermissionRequest) | ✅ | ✅ | Generic; both CLIs wired in `managedTerminalWrappers.ts` (`buildClaudeSettingsJson` / `buildCodexHooksJson`). |
-| Terminal sidebar attention pill (Pending / Completed) | ✅ | ✅ | Driven by generic `terminalAttentionStatesById`, no per-CLI logic. |
-| Toast on completion / input needed (Open dismisses + clears pill) | ✅ | ✅ | Generic. |
-| Session id capture for `--resume` | ✅ | ❌ | Claude path: `_t3code_emit_claude_meta` reads `session_id` from hook input and emits via OSC. Codex needs a sibling extractor (its session id surfaces differently). |
-| Auto title from in-session rename / summary | ✅ | ❌ | Claude reads `custom-title` / `ai-title` records out of the transcript `.jsonl`. Codex stores its session/rollout differently — needs its own extractor + an analogue to `isAutoDerivedClaudeTerminalTitle`. |
-| Diff panel follows worktree the CLI is editing in | ✅ | ❌ | Claude path: hook scans transcript for the most recent absolute `"file_path"` and emits its dirname; client overrides the worktree path when it falls outside the project root. Codex needs a transcript scan tuned to its event format. |
-| Review / Summary panel populated for terminal turns | ✅ | ❌ | `wsServer.ts` synthesizes `thread.turn.diff.complete` from `cliKind === "claude"` activity transitions. To enable for Codex: extend the gate to also accept `"codex"` (one-line change once Codex emits the same activity event, which it already does). |
+| Feature                                                           | Claude | Codex | Notes                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------- | ------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OSC hook events (Start / Stop / PermissionRequest)                | ✅     | ✅    | Generic; both CLIs wired in `managedTerminalWrappers.ts` (`buildClaudeSettingsJson` / `buildCodexHooksJson`).                                                                                                                                            |
+| Terminal sidebar attention pill (Pending / Completed)             | ✅     | ✅    | Driven by generic `terminalAttentionStatesById`, no per-CLI logic.                                                                                                                                                                                       |
+| Toast on completion / input needed (Open dismisses + clears pill) | ✅     | ✅    | Generic.                                                                                                                                                                                                                                                 |
+| Session id capture for `--resume`                                 | ✅     | ❌    | Claude path: `_t3code_emit_claude_meta` reads `session_id` from hook input and emits via OSC. Codex needs a sibling extractor (its session id surfaces differently).                                                                                     |
+| Auto title from in-session rename / summary                       | ✅     | ❌    | Claude reads `custom-title` / `ai-title` records out of the transcript `.jsonl`. Codex stores its session/rollout differently — needs its own extractor + an analogue to `isAutoDerivedClaudeTerminalTitle`.                                             |
+| Diff panel follows worktree the CLI is editing in                 | ✅     | ❌    | Claude path: hook scans transcript for the most recent absolute `"file_path"` and emits its dirname; client overrides the worktree path when it falls outside the project root. Codex needs a transcript scan tuned to its event format.                 |
+| Review / Summary panel populated for terminal turns               | ✅     | ❌    | `wsServer.ts` synthesizes `thread.turn.diff.complete` from `cliKind === "claude"` activity transitions. To enable for Codex: extend the gate to also accept `"codex"` (one-line change once Codex emits the same activity event, which it already does). |
 
 ## Where the Claude-shaped code lives
 

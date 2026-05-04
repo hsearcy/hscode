@@ -60,6 +60,7 @@ import {
   Struct,
 } from "effect";
 import OS from "node:os";
+import { execFileSync } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { createLogger } from "./logger";
@@ -1525,14 +1526,37 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const claudeReportedCwdByThreadId = new Map<string, string>();
   const pendingTerminalTurnByThreadId = new Map<string, SyntheticTerminalTurn>();
 
+  // Capture must always run from the worktree root, not a deep subdirectory.
+  // `git add -A .` only adds files under the cwd, but `read-tree HEAD` reads
+  // the full tree, so capturing from a subdir would write the entire HEAD tree
+  // mixed with the subdir's actual state. If begin and complete happen at
+  // different subdirs (because the most-recent-file path drifts during a
+  // turn), the resulting trees diverge in unrelated paths and the diff blows
+  // up to look like a full branch comparison.
+  const resolveGitToplevel = (cwd: string): string | null => {
+    try {
+      const stdout = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const trimmed = stdout.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch {
+      return null;
+    }
+  };
+
   const resolveTerminalThreadCwd = Effect.fnUntraced(function* (threadId: string) {
     // Prefer the cwd Claude reports through the OSC hook (which is the
-    // directory of its most recent edit). Git resolves the surrounding
-    // worktree root from any path inside it, so this works even when the
-    // path is several levels deep inside a sibling worktree.
+    // directory of its most recent edit). Resolve to the surrounding worktree
+    // root so capture covers the whole worktree consistently.
     const reportedCwd = claudeReportedCwdByThreadId.get(threadId);
     if (reportedCwd) {
-      return reportedCwd;
+      const toplevel = resolveGitToplevel(reportedCwd);
+      if (toplevel) {
+        return toplevel;
+      }
     }
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.find((entry) => entry.id === threadId);
@@ -1601,6 +1625,15 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       return;
     }
     pendingTerminalTurnByThreadId.delete(input.threadId);
+    // If the resolved worktree drifted between begin and complete (e.g.
+    // baseline was captured at projectCwd before any claude-session event,
+    // then edits landed in a sibling worktree), the two refs would describe
+    // unrelated trees and `git diff` would explode. Skip rather than dispatch
+    // a misleading huge diff.
+    const currentCwd = yield* resolveTerminalThreadCwd(input.threadId);
+    if (currentCwd !== pending.cwd) {
+      return;
+    }
     const targetCheckpointRef = checkpointRefForThreadTurn(
       ThreadId.makeUnsafe(input.threadId),
       pending.turnCount,

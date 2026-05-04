@@ -128,6 +128,7 @@ import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { useTerminalActivityStore } from "../terminalActivityStore";
 import { toastManager } from "./ui/toast";
 import {
   normalizeSidebarProjectThreadListCwd,
@@ -3335,16 +3336,37 @@ export default function Sidebar() {
     () => groupSidebarThreadsByProjectId(sidebarDisplayThreads),
     [sidebarDisplayThreads],
   );
+  // Terminal-cli threads have no chat user messages, so overlay the most
+  // recent local terminal-input timestamp onto `latestUserMessageAt` to make
+  // "sort by last user message" reflect actual terminal activity.
+  const terminalLastInputAtByThreadId = useTerminalActivityStore(
+    (state) => state.lastInputAtByThreadId,
+  );
+  const applyTerminalActivity = useCallback(
+    (thread: SidebarThreadSummary): SidebarThreadSummary => {
+      if (thread.interactionMode !== "terminal-cli") return thread;
+      const inputAt = terminalLastInputAtByThreadId[thread.id];
+      if (!inputAt) return thread;
+      if (thread.latestUserMessageAt && thread.latestUserMessageAt >= inputAt) {
+        return thread;
+      }
+      return { ...thread, latestUserMessageAt: inputAt };
+    },
+    [terminalLastInputAtByThreadId],
+  );
   const sortedSidebarThreadsByProjectId = useMemo(() => {
     const byProjectId = new Map<ProjectId, SidebarThreadSummary[]>();
     for (const [projectId, projectThreads] of sidebarThreadsByProjectId) {
       byProjectId.set(
         projectId,
-        sortThreadsForSidebar(projectThreads, appSettings.sidebarThreadSortOrder),
+        sortThreadsForSidebar(
+          projectThreads.map(applyTerminalActivity),
+          appSettings.sidebarThreadSortOrder,
+        ),
       );
     }
     return byProjectId;
-  }, [appSettings.sidebarThreadSortOrder, sidebarThreadsByProjectId]);
+  }, [applyTerminalActivity, appSettings.sidebarThreadSortOrder, sidebarThreadsByProjectId]);
   const resolveSplitPreview = useCallback(
     (threadId: ThreadId | null): SidebarSplitPreview => {
       const thread = threadId ? (sidebarThreadSummaryById[threadId] ?? null) : null;
@@ -3388,9 +3410,18 @@ export default function Sidebar() {
     [cancelProjectRename, renameProjectLocally],
   );
 
+  const sidebarThreadsForProjectSort = useMemo(
+    () => sidebarThreads.map(applyTerminalActivity),
+    [applyTerminalActivity, sidebarThreads],
+  );
   const sortedProjects = useMemo(
-    () => sortProjectsForSidebar(projects, sidebarThreads, appSettings.sidebarProjectSortOrder),
-    [appSettings.sidebarProjectSortOrder, projects, sidebarThreads],
+    () =>
+      sortProjectsForSidebar(
+        projects,
+        sidebarThreadsForProjectSort,
+        appSettings.sidebarProjectSortOrder,
+      ),
+    [appSettings.sidebarProjectSortOrder, projects, sidebarThreadsForProjectSort],
   );
   const chatProjects = useMemo(
     () => sortedProjects.filter((project) => isHomeChatContainerProject(project, homeDir)),

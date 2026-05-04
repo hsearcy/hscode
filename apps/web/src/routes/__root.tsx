@@ -35,6 +35,7 @@ import { readNativeApi } from "../nativeApi";
 import { clearPromotedDraftThreads, useComposerDraftStore } from "../composerDraftStore";
 import { useStore } from "../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { useTerminalActivityStore } from "../terminalActivityStore";
 import { terminalActivityFromEvent } from "../terminalActivity";
 import {
   onServerConfigUpdated,
@@ -648,6 +649,19 @@ function EventRouter() {
       const activity = terminalActivityFromEvent(event);
       if (activity === null) {
         return;
+      }
+      // Treat the agent transitioning into "running" as the user submitting
+      // a prompt to the CLI — that's the terminal-thread analogue of sending
+      // a chat message and is what should bump the sidebar's last-activity
+      // sort.
+      const wasRunning =
+        useTerminalStateStore
+          .getState()
+          .terminalStateByThreadId[terminalThreadId]?.runningTerminalIds.includes(
+            event.terminalId,
+          ) ?? false;
+      if (activity.agentState === "running" && !wasRunning) {
+        useTerminalActivityStore.getState().recordTerminalUserInput(terminalThreadId);
       }
       useTerminalStateStore.getState().setTerminalActivity(terminalThreadId, event.terminalId, {
         hasRunningSubprocess: activity.hasRunningSubprocess,
