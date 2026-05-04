@@ -152,6 +152,7 @@ const TerminalClaudeSessionEvent = Schema.Struct({
   type: Schema.Literal("claude-session"),
   sessionId: Schema.String.check(Schema.isNonEmpty()),
   summary: Schema.NullOr(Schema.String),
+  cwd: Schema.NullOr(Schema.String),
 });
 
 export const TerminalEvent = Schema.Union([

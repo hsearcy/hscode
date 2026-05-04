@@ -480,6 +480,7 @@ function shouldStripOscSequence(content: string): boolean {
 interface ClaudeSessionMetaSignal {
   sessionId: string;
   summary: string | null;
+  cwd: string | null;
 }
 
 function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSignal | null {
@@ -505,15 +506,17 @@ function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSigna
   if (typeof parsed !== "object" || parsed === null) {
     return null;
   }
-  const record = parsed as { sessionId?: unknown; summary?: unknown };
+  const record = parsed as { sessionId?: unknown; summary?: unknown; cwd?: unknown };
   const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
   if (sessionId.length === 0) {
     return null;
   }
   const summaryRaw = typeof record.summary === "string" ? record.summary.trim() : "";
+  const cwdRaw = typeof record.cwd === "string" ? record.cwd.trim() : "";
   return {
     sessionId,
     summary: summaryRaw.length > 0 ? summaryRaw : null,
+    cwd: cwdRaw.length > 0 ? cwdRaw : null,
   };
 }
 
@@ -1401,6 +1404,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         createdAt: new Date().toISOString(),
         sessionId: claudeMeta.sessionId,
         summary: claudeMeta.summary,
+        cwd: claudeMeta.cwd,
       });
     }
     const titleSignalCliKind =

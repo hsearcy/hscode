@@ -145,9 +145,14 @@ _t3code_emit_claude_meta() {
         | sed -n 's/.*"aiTitle"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
     fi
   fi
+  # Hook input includes "cwd" — Claude's working directory at hook time. When
+  # Claude operates inside a worktree it created itself (e.g. via Agent
+  # isolation: "worktree"), this surfaces that path so the diff panel can
+  # follow along even though the host terminal still lives at the project root.
+  _t3code_cwd="$(_t3code_extract_event cwd)"
   if command -v base64 >/dev/null 2>&1; then
-    _t3code_payload="$(printf '{"sessionId":"%s","summary":"%s"}' \\
-      "$_t3code_session_id" "$_t3code_summary" | base64 | tr -d '\\n')"
+    _t3code_payload="$(printf '{"sessionId":"%s","summary":"%s","cwd":"%s"}' \\
+      "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd" | base64 | tr -d '\\n')"
     _t3code_emit_osc "\\033]${T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX}\${_t3code_payload}\\007"
   fi
 }

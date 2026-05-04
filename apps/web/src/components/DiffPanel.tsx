@@ -43,6 +43,7 @@ import { resolveDiffEnvironmentState } from "../lib/threadEnvironment";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useStore } from "../store";
+import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
 import { createProjectSelector, createThreadSelector } from "../storeSelectors";
 import { getProviderStartOptions, useAppSettings } from "../appSettings";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -266,10 +267,25 @@ export default function DiffPanel({
     serverThread?.envMode ?? draftThread?.envMode ?? activeThread?.envMode;
   const resolvedThreadWorktreePath =
     serverThread?.worktreePath ?? draftThread?.worktreePath ?? activeThread?.worktreePath ?? null;
+  // When Claude is running in a terminal and creates its own worktree, the
+  // SessionStart/UserPromptSubmit/Stop hooks emit Claude's current cwd. If
+  // that cwd differs from the project root, treat it as the effective
+  // worktree for diff/summary surfaces so the panel follows Claude's work.
+  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
+    activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
+  );
+  const projectCwd = activeProject?.cwd ?? null;
+  const claudeEffectiveWorktreePath =
+    resolvedThreadWorktreePath === null &&
+    claudeReportedCwd !== null &&
+    projectCwd !== null &&
+    claudeReportedCwd !== projectCwd
+      ? claudeReportedCwd
+      : resolvedThreadWorktreePath;
   const diffEnvironmentState = resolveDiffEnvironmentState({
-    projectCwd: activeProject?.cwd ?? null,
+    projectCwd,
     envMode: resolvedThreadEnvMode,
-    worktreePath: resolvedThreadWorktreePath,
+    worktreePath: claudeEffectiveWorktreePath,
   });
   const diffEnvironmentPending = diffEnvironmentState.pending;
   const activeCwd = diffEnvironmentState.cwd;

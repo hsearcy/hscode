@@ -45,6 +45,7 @@ import { providerQueryKeys } from "../lib/providerReactQuery";
 import { projectQueryKeys } from "../lib/projectReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
 import { TaskCompletionNotifications } from "../notifications/taskCompletion";
+import { ClaudeSessionCwdSubscriber } from "../notifications/claudeSessionCwdSubscriber";
 import { useWorkspaceStore, workspaceThreadId } from "../workspaceStore";
 import {
   subscribeRetainedThreadDetailIdChanges,
@@ -95,6 +96,7 @@ function RootRouteView() {
         <GlobalShortcutsDialog />
         <GlobalWhatsNewSurface />
         <TaskCompletionNotifications />
+        <ClaudeSessionCwdSubscriber />
         <DesktopProjectBootstrap />
         <Outlet />
       </AnchoredToastProvider>
