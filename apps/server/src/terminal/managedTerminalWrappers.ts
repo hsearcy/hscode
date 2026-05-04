@@ -145,11 +145,26 @@ _t3code_emit_claude_meta() {
         | sed -n 's/.*"aiTitle"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
     fi
   fi
-  # Hook input includes "cwd" — Claude's working directory at hook time. When
-  # Claude operates inside a worktree it created itself (e.g. via Agent
-  # isolation: "worktree"), this surfaces that path so the diff panel can
-  # follow along even though the host terminal still lives at the project root.
-  _t3code_cwd="$(_t3code_extract_event cwd)"
+  # Claude's hook "cwd" is its launch dir and never moves (cd inside Bash
+  # subshells doesn't change it), so it can't tell us which worktree the
+  # actual edits are landing in. Instead, scan the transcript for the most
+  # recent absolute "file_path" from an edit-style tool_use (Edit/Write/
+  # MultiEdit/Update) and emit its directory. Git resolves the surrounding
+  # worktree root from any path inside it, so feeding its parent into the
+  # diff queries is enough.
+  _t3code_cwd=""
+  if [ -n "$_t3code_transcript_path" ] && [ -r "$_t3code_transcript_path" ]; then
+    _t3code_recent_file="$(grep -oE '"file_path"[[:space:]]*:[[:space:]]*"/[^"]*"' \\
+      "$_t3code_transcript_path" 2>/dev/null \\
+      | tail -n 1 \\
+      | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
+    if [ -n "$_t3code_recent_file" ]; then
+      _t3code_cwd="$(dirname "$_t3code_recent_file")"
+    fi
+  fi
+  if [ -z "$_t3code_cwd" ]; then
+    _t3code_cwd="$(_t3code_extract_event cwd)"
+  fi
   if command -v base64 >/dev/null 2>&1; then
     _t3code_payload="$(printf '{"sessionId":"%s","summary":"%s","cwd":"%s"}' \\
       "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd" | base64 | tr -d '\\n')"

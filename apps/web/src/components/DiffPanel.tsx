@@ -267,19 +267,24 @@ export default function DiffPanel({
     serverThread?.envMode ?? draftThread?.envMode ?? activeThread?.envMode;
   const resolvedThreadWorktreePath =
     serverThread?.worktreePath ?? draftThread?.worktreePath ?? activeThread?.worktreePath ?? null;
-  // When Claude is running in a terminal and creates its own worktree, the
-  // SessionStart/UserPromptSubmit/Stop hooks emit Claude's current cwd. If
-  // that cwd differs from the project root, treat it as the effective
-  // worktree for diff/summary surfaces so the panel follows Claude's work.
+  // When Claude operates inside a worktree it created itself (e.g. via Agent
+  // isolation: "worktree" or `git worktree add`), the hook surfaces the
+  // directory of the most recent file edit. Only override when that path
+  // falls outside the project root tree — otherwise it's just a deep
+  // subdirectory of the project. Git resolves the surrounding worktree root
+  // from any path inside it, so feeding the parent dir into the diff queries
+  // is enough.
   const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
     activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
   );
   const projectCwd = activeProject?.cwd ?? null;
-  const claudeEffectiveWorktreePath =
-    resolvedThreadWorktreePath === null &&
+  const claudeReportedCwdIsOutsideProject =
     claudeReportedCwd !== null &&
     projectCwd !== null &&
-    claudeReportedCwd !== projectCwd
+    claudeReportedCwd !== projectCwd &&
+    !claudeReportedCwd.startsWith(`${projectCwd}/`);
+  const claudeEffectiveWorktreePath =
+    resolvedThreadWorktreePath === null && claudeReportedCwdIsOutsideProject
       ? claudeReportedCwd
       : resolvedThreadWorktreePath;
   const diffEnvironmentState = resolveDiffEnvironmentState({
