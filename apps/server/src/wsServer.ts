@@ -23,6 +23,8 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   type ClientOrchestrationCommand,
   MessageId,
+  type CheckpointRef,
+  TurnId,
   type OrchestrationEvent,
   type ThreadHandoffImportedMessage,
   type OrchestrationReadModel,
@@ -61,7 +63,14 @@ import OS from "node:os";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { createLogger } from "./logger";
-import { resolveThreadWorkspaceCwd } from "./checkpointing/Utils.ts";
+import {
+  checkpointRefForThreadTurn,
+  checkpointRefForThreadTurnStart,
+  resolveThreadWorkspaceCwd,
+} from "./checkpointing/Utils.ts";
+import { CheckpointStore } from "./checkpointing/Services/CheckpointStore.ts";
+import { parseTurnDiffFilesFromUnifiedDiff } from "./checkpointing/Diffs.ts";
+import { isGitRepository } from "./git/isRepo.ts";
 import { GitManager } from "./git/Services/GitManager.ts";
 import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { Keybindings } from "./keybindings";
@@ -110,6 +119,7 @@ import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracke
 import {
   defaultTerminalTitleForCliKind,
   isGenericTerminalThreadTitle,
+  type TerminalCliKind,
 } from "@t3tools/shared/terminalThreads";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 
@@ -577,6 +587,7 @@ export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
+  | CheckpointStore
   | OrchestrationReactor
   | ProviderService
   | ProviderDiscoveryService
@@ -1496,21 +1507,213 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     });
   });
 
+  // Terminal Claude has no provider runtime turns, so the Review/Summary
+  // surfaces stay empty by default. Synthesize a turn lifecycle from terminal
+  // running-state transitions: when the first Claude terminal in a thread
+  // starts running we capture a baseline checkpoint; when the last one stops
+  // we capture the target checkpoint, diff, and dispatch the same
+  // `thread.turn.diff.complete` command CheckpointReactor would.
+  const checkpointStore = yield* CheckpointStore;
+  interface SyntheticTerminalTurn {
+    readonly turnId: TurnId;
+    readonly fromCheckpointRef: CheckpointRef;
+    readonly cwd: string;
+    readonly turnCount: number;
+    readonly startedAt: string;
+  }
+  const claudeRunningTerminalsByThreadId = new Map<string, Set<string>>();
+  const claudeReportedCwdByThreadId = new Map<string, string>();
+  const pendingTerminalTurnByThreadId = new Map<string, SyntheticTerminalTurn>();
+
+  const resolveTerminalThreadCwd = Effect.fnUntraced(function* (threadId: string) {
+    // Prefer the cwd Claude reports through the OSC hook (which is the
+    // directory of its most recent edit). Git resolves the surrounding
+    // worktree root from any path inside it, so this works even when the
+    // path is several levels deep inside a sibling worktree.
+    const reportedCwd = claudeReportedCwdByThreadId.get(threadId);
+    if (reportedCwd) {
+      return reportedCwd;
+    }
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    if (!thread) {
+      return null;
+    }
+    const projectCwd = resolveThreadWorkspaceCwd({
+      thread: { projectId: thread.projectId, worktreePath: thread.worktreePath },
+      projects: readModel.projects.map((project) => ({
+        id: project.id,
+        workspaceRoot: project.workspaceRoot,
+      })),
+    });
+    if (!projectCwd || !isGitRepository(projectCwd)) {
+      return null;
+    }
+    return projectCwd;
+  });
+
+  const beginTerminalTurn = Effect.fnUntraced(function* (input: {
+    readonly threadId: string;
+    readonly startedAt: string;
+  }) {
+    if (pendingTerminalTurnByThreadId.has(input.threadId)) {
+      return;
+    }
+    const cwd = yield* resolveTerminalThreadCwd(input.threadId);
+    if (!cwd) {
+      return;
+    }
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return;
+    }
+    const turnId = TurnId.makeUnsafe(`terminal:${crypto.randomUUID()}`);
+    const fromCheckpointRef = checkpointRefForThreadTurnStart(
+      ThreadId.makeUnsafe(input.threadId),
+      turnId,
+    );
+    const baselineResult = yield* Effect.result(
+      checkpointStore.captureCheckpoint({ cwd, checkpointRef: fromCheckpointRef }),
+    );
+    if (baselineResult._tag === "Failure") {
+      return;
+    }
+    const currentTurnCount = thread.checkpoints.reduce(
+      (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
+      0,
+    );
+    pendingTerminalTurnByThreadId.set(input.threadId, {
+      turnId,
+      fromCheckpointRef,
+      cwd,
+      turnCount: currentTurnCount + 1,
+      startedAt: input.startedAt,
+    });
+  });
+
+  const completeTerminalTurn = Effect.fnUntraced(function* (input: {
+    readonly threadId: string;
+    readonly completedAt: string;
+  }) {
+    const pending = pendingTerminalTurnByThreadId.get(input.threadId);
+    if (!pending) {
+      return;
+    }
+    pendingTerminalTurnByThreadId.delete(input.threadId);
+    const targetCheckpointRef = checkpointRefForThreadTurn(
+      ThreadId.makeUnsafe(input.threadId),
+      pending.turnCount,
+    );
+    const captureResult = yield* Effect.result(
+      checkpointStore.captureCheckpoint({
+        cwd: pending.cwd,
+        checkpointRef: targetCheckpointRef,
+      }),
+    );
+    if (captureResult._tag === "Failure") {
+      return;
+    }
+    const diffResult = yield* Effect.result(
+      checkpointStore.diffCheckpoints({
+        cwd: pending.cwd,
+        fromCheckpointRef: pending.fromCheckpointRef,
+        toCheckpointRef: targetCheckpointRef,
+        fallbackFromToHead: false,
+      }),
+    );
+    if (diffResult._tag === "Failure") {
+      return;
+    }
+    const files = parseTurnDiffFilesFromUnifiedDiff(diffResult.success).map((file) => ({
+      path: file.path,
+      kind: "modified" as const,
+      additions: file.additions,
+      deletions: file.deletions,
+    }));
+    if (files.length === 0) {
+      // Nothing to show — skip the dispatch so empty turns don't pile up.
+      return;
+    }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.makeUnsafe(`server:terminal-turn-diff:${crypto.randomUUID()}`),
+      threadId: ThreadId.makeUnsafe(input.threadId),
+      turnId: pending.turnId,
+      completedAt: input.completedAt,
+      checkpointRef: targetCheckpointRef,
+      status: "ready",
+      files,
+      assistantMessageId: undefined,
+      checkpointTurnCount: pending.turnCount,
+      createdAt: input.completedAt,
+    });
+  });
+
+  const handleTerminalActivityForCheckpoint = (event: {
+    readonly threadId: string;
+    readonly terminalId: string;
+    readonly cliKind: TerminalCliKind | null;
+    readonly hasRunningSubprocess: boolean;
+    readonly createdAt: string;
+  }) => {
+    if (event.cliKind !== "claude") {
+      return;
+    }
+    const runningSet = claudeRunningTerminalsByThreadId.get(event.threadId) ?? new Set<string>();
+    const wasEmpty = runningSet.size === 0;
+    if (event.hasRunningSubprocess) {
+      runningSet.add(event.terminalId);
+    } else {
+      runningSet.delete(event.terminalId);
+    }
+    if (runningSet.size === 0) {
+      claudeRunningTerminalsByThreadId.delete(event.threadId);
+    } else {
+      claudeRunningTerminalsByThreadId.set(event.threadId, runningSet);
+    }
+    if (wasEmpty && runningSet.size > 0) {
+      void runPromise(
+        beginTerminalTurn({ threadId: event.threadId, startedAt: event.createdAt }).pipe(
+          Effect.catchCause(() => Effect.void),
+        ),
+      );
+    } else if (!wasEmpty && runningSet.size === 0) {
+      void runPromise(
+        completeTerminalTurn({ threadId: event.threadId, completedAt: event.createdAt }).pipe(
+          Effect.catchCause(() => Effect.void),
+        ),
+      );
+    }
+  };
+
   const unsubscribeTerminalEvents = yield* terminalManager.subscribe(
     (event) => void Effect.runPromise(pushBus.publishAll(WS_CHANNELS.terminalEvent, event)),
   );
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
   const unsubscribeClaudeSessionEvents = yield* terminalManager.subscribe((event) => {
-    if (event.type !== "claude-session") {
+    if (event.type === "claude-session") {
+      if (event.cwd) {
+        claudeReportedCwdByThreadId.set(event.threadId, event.cwd);
+      }
+      void runPromise(
+        applyClaudeSessionMeta({
+          threadId: event.threadId,
+          sessionId: event.sessionId,
+          summary: event.summary,
+        }).pipe(Effect.catchCause(() => Effect.void)),
+      );
       return;
     }
-    void runPromise(
-      applyClaudeSessionMeta({
+    if (event.type === "activity") {
+      handleTerminalActivityForCheckpoint({
         threadId: event.threadId,
-        sessionId: event.sessionId,
-        summary: event.summary,
-      }).pipe(Effect.catchCause(() => Effect.void)),
-    );
+        terminalId: event.terminalId,
+        cliKind: event.cliKind,
+        hasRunningSubprocess: event.hasRunningSubprocess,
+        createdAt: event.createdAt,
+      });
+    }
   });
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeClaudeSessionEvents()));
   yield* readiness.markTerminalSubscriptionsReady;
