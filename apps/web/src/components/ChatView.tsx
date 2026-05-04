@@ -152,6 +152,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useStore } from "../store";
+import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { getThreadFromState } from "../threadDerivation";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -1972,11 +1973,28 @@ export default function ChatView({
     latestTurnSettled,
     timelineEntries,
   ]);
+  // When Claude is running in a terminal and operates inside a worktree it
+  // created itself, override the workspace cwd so the header git-status
+  // totals (and other cwd-derived surfaces) reflect that worktree instead of
+  // the shared project root — otherwise every terminal thread shows the same
+  // numbers from projectCwd.
+  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
+    activeThread?.id ? (store.cwdByThreadId[activeThread.id] ?? null) : null,
+  );
+  const projectCwd = activeProject?.cwd ?? null;
+  const claudeEffectiveWorktreePath =
+    resolvedThreadWorktreePath === null &&
+    claudeReportedCwd !== null &&
+    projectCwd !== null &&
+    claudeReportedCwd !== projectCwd &&
+    !claudeReportedCwd.startsWith(`${projectCwd}/`)
+      ? claudeReportedCwd
+      : resolvedThreadWorktreePath;
   const threadWorkspaceCwd = activeProject
     ? resolveSharedThreadWorkspaceCwd({
         projectCwd: activeProject.cwd,
         envMode: resolvedThreadEnvMode,
-        worktreePath: resolvedThreadWorktreePath,
+        worktreePath: claudeEffectiveWorktreePath,
       })
     : null;
   const gitCwd = threadWorkspaceCwd;
