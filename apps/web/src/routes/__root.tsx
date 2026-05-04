@@ -636,6 +636,15 @@ function EventRouter() {
       threadSnapshotSequenceById.set(threadId, item.event.sequence);
       queueDomainEvent(item.event);
     });
+    // The server auto-runs `claude --resume <id>` (or `codex resume --last`)
+    // on terminal open/restart, which triggers an idle→running transition
+    // that isn't a user-submitted prompt. Skip that first transition per
+    // (thread, terminal) so reopening an old conversation doesn't re-sort it.
+    // The CLI subprocess stays alive across turns, so we track agentState
+    // transitions explicitly (the store only keeps hasRunningSubprocess).
+    const skipNextRunByTerminalKey = new Set<string>();
+    const previousAgentStateByTerminalKey = new Map<string, string | null>();
+    const terminalKey = (threadId: string, terminalId: string) => `${threadId}::${terminalId}`;
     const unsubTerminalEvent = api.terminal.onEvent((event) => {
       const terminalThreadId = ThreadId.makeUnsafe(event.threadId);
       if (event.type === "activity") {
@@ -646,6 +655,11 @@ function EventRouter() {
           });
         }
       }
+      if (event.type === "started" || event.type === "restarted") {
+        const key = terminalKey(event.threadId, event.terminalId);
+        skipNextRunByTerminalKey.add(key);
+        previousAgentStateByTerminalKey.delete(key);
+      }
       const activity = terminalActivityFromEvent(event);
       if (activity === null) {
         return;
@@ -654,14 +668,15 @@ function EventRouter() {
       // a prompt to the CLI — that's the terminal-thread analogue of sending
       // a chat message and is what should bump the sidebar's last-activity
       // sort.
-      const wasRunning =
-        useTerminalStateStore
-          .getState()
-          .terminalStateByThreadId[terminalThreadId]?.runningTerminalIds.includes(
-            event.terminalId,
-          ) ?? false;
-      if (activity.agentState === "running" && !wasRunning) {
-        useTerminalActivityStore.getState().recordTerminalUserInput(terminalThreadId);
+      const key = terminalKey(event.threadId, event.terminalId);
+      const previousAgentState = previousAgentStateByTerminalKey.get(key) ?? null;
+      previousAgentStateByTerminalKey.set(key, activity.agentState);
+      if (activity.agentState === "running" && previousAgentState !== "running") {
+        if (skipNextRunByTerminalKey.has(key)) {
+          skipNextRunByTerminalKey.delete(key);
+        } else {
+          useTerminalActivityStore.getState().recordTerminalUserInput(terminalThreadId);
+        }
       }
       useTerminalStateStore.getState().setTerminalActivity(terminalThreadId, event.terminalId, {
         hasRunningSubprocess: activity.hasRunningSubprocess,
