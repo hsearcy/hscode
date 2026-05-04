@@ -1581,12 +1581,21 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     readonly startedAt: string;
   }) {
     if (pendingTerminalTurnByThreadId.has(input.threadId)) {
+      logger.info("terminal turn begin skipped (already pending)", {
+        threadId: input.threadId,
+      });
       return;
     }
     const cwd = yield* resolveTerminalThreadCwd(input.threadId);
     if (!cwd) {
+      logger.warn("terminal turn begin skipped (no cwd)", { threadId: input.threadId });
       return;
     }
+    logger.info("terminal turn begin", {
+      threadId: input.threadId,
+      cwd,
+      reportedCwd: claudeReportedCwdByThreadId.get(input.threadId) ?? null,
+    });
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.find((entry) => entry.id === input.threadId);
     if (!thread) {
@@ -1601,6 +1610,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       checkpointStore.captureCheckpoint({ cwd, checkpointRef: fromCheckpointRef }),
     );
     if (baselineResult._tag === "Failure") {
+      logger.warn("terminal turn baseline capture failed", {
+        threadId: input.threadId,
+        cwd,
+        error: String(baselineResult.failure),
+      });
       return;
     }
     const currentTurnCount = thread.checkpoints.reduce(
@@ -1622,6 +1636,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   }) {
     const pending = pendingTerminalTurnByThreadId.get(input.threadId);
     if (!pending) {
+      logger.info("terminal turn complete skipped (no pending)", {
+        threadId: input.threadId,
+      });
       return;
     }
     pendingTerminalTurnByThreadId.delete(input.threadId);
@@ -1632,6 +1649,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     // a misleading huge diff.
     const currentCwd = yield* resolveTerminalThreadCwd(input.threadId);
     if (currentCwd !== pending.cwd) {
+      logger.warn("terminal turn complete skipped (cwd drift)", {
+        threadId: input.threadId,
+        baselineCwd: pending.cwd,
+        completeCwd: currentCwd,
+      });
       return;
     }
     const targetCheckpointRef = checkpointRefForThreadTurn(
@@ -1645,6 +1667,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       }),
     );
     if (captureResult._tag === "Failure") {
+      logger.warn("terminal turn target capture failed", {
+        threadId: input.threadId,
+        cwd: pending.cwd,
+        error: String(captureResult.failure),
+      });
       return;
     }
     const diffResult = yield* Effect.result(
@@ -1656,6 +1683,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       }),
     );
     if (diffResult._tag === "Failure") {
+      logger.warn("terminal turn diff failed", {
+        threadId: input.threadId,
+        cwd: pending.cwd,
+        error: String(diffResult.failure),
+      });
       return;
     }
     const files = parseTurnDiffFilesFromUnifiedDiff(diffResult.success).map((file) => ({
@@ -1664,6 +1696,13 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       additions: file.additions,
       deletions: file.deletions,
     }));
+    logger.info("terminal turn complete", {
+      threadId: input.threadId,
+      cwd: pending.cwd,
+      turnCount: pending.turnCount,
+      fileCount: files.length,
+      diffBytes: diffResult.success.length,
+    });
     if (files.length === 0) {
       // Nothing to show — skip the dispatch so empty turns don't pile up.
       return;
