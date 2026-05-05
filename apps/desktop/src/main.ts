@@ -1952,6 +1952,38 @@ function createWindow(): BrowserWindow {
     Menu.buildFromTemplate(menuTemplate).popup({ window });
   });
 
+  // Recover the main window when the renderer dies or hangs (common after the
+  // host display sleeps on Linux/WSLg, leaving a black window until reload).
+  let reloadingAfterCrash = false;
+  const reloadAfterCrash = (reason: string, detail?: Record<string, unknown>) => {
+    if (window.isDestroyed() || reloadingAfterCrash) return;
+    reloadingAfterCrash = true;
+    console.warn(`[desktop] main window renderer ${reason}; reloading`, detail);
+    try {
+      window.webContents.reloadIgnoringCache();
+    } catch (error) {
+      console.error("[desktop] failed to reload main window after renderer loss", error);
+      reloadingAfterCrash = false;
+    }
+  };
+  window.webContents.on("did-finish-load", () => {
+    reloadingAfterCrash = false;
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    reloadAfterCrash("process gone", { reason: details.reason, exitCode: details.exitCode });
+  });
+  window.on("unresponsive", () => {
+    reloadAfterCrash("unresponsive");
+  });
+  window.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      if (errorCode === -3) return; // ERR_ABORTED — navigation superseded; ignore.
+      reloadAfterCrash("did-fail-load", { errorCode, errorDescription, validatedURL });
+    },
+  );
+
   window.webContents.setWindowOpenHandler(({ url }) => {
     const externalUrl = getSafeExternalUrl(url);
     if (externalUrl) {
