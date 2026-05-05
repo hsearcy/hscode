@@ -2426,6 +2426,23 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           }
           const row = threadRow.value;
           const launched = row.cliLaunchedOnce;
+          // If the PTY already has the matching CLI live (managed-agent mid-turn
+          // or a detected subprocess matching this thread's CLI), don't auto-type
+          // a resume command — it would land in Claude's prompt as user input.
+          const terminalId = body.terminalId ?? DEFAULT_TERMINAL_ID;
+          const activity = yield* terminalManager.getSessionActivity(body.threadId, terminalId);
+          if (
+            activity &&
+            (activity.managedAgentRunning ||
+              (activity.hasRunningSubprocess && activity.detectedCliKind === cliKind))
+          ) {
+            if (!launched) {
+              yield* projectionThreadRepository.markCliLaunchedOnce({
+                threadId: ThreadId.makeUnsafe(body.threadId),
+              });
+            }
+            return;
+          }
           let initialCommand: string;
           if (cliKind === "claude") {
             initialCommand = launched
@@ -2436,7 +2453,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           }
           yield* terminalManager.write({
             threadId: body.threadId,
-            terminalId: body.terminalId ?? DEFAULT_TERMINAL_ID,
+            terminalId,
             data: `${initialCommand}\r`,
           });
           if (!launched) {

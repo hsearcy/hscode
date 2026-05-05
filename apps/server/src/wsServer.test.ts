@@ -217,6 +217,9 @@ class MockTerminalManager implements TerminalManagerShape {
       }
     });
 
+  readonly getSessionActivity: TerminalManagerShape["getSessionActivity"] = () =>
+    Effect.sync(() => null);
+
   readonly subscribe: TerminalManagerShape["subscribe"] = (listener) =>
     Effect.sync(() => {
       this.listeners.add(listener);

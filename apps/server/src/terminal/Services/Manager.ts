@@ -17,6 +17,20 @@ import {
   TerminalSessionStatus,
   TerminalWriteInput,
 } from "@t3tools/contracts";
+
+/**
+ * Lightweight read-only view of a terminal session's runtime activity.
+ *
+ * Returned by `getSessionActivity` so callers can decide whether the PTY is
+ * idle at a shell prompt or already busy running a managed CLI.
+ */
+export interface TerminalSessionActivity {
+  status: TerminalSessionStatus;
+  hasRunningSubprocess: boolean;
+  detectedCliKind: TerminalCliKind | null;
+  managedAgentRunning: boolean;
+  managedAgentObserved: boolean;
+}
 import type { TerminalActivityState, TerminalCliKind } from "@t3tools/shared/terminalThreads";
 import { PtyProcess } from "./PTY";
 import { Effect, Schema, ServiceMap } from "effect";
@@ -123,6 +137,18 @@ export interface TerminalManagerShape {
    * When `terminalId` is omitted, closes all sessions for the thread.
    */
   readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+
+  /**
+   * Read the live activity state of a session, or null if it is not open.
+   *
+   * Used to avoid sending a fresh "claude --resume" command into a PTY that is
+   * already mid-turn — if Claude is running we'd otherwise type the command
+   * straight into its prompt.
+   */
+  readonly getSessionActivity: (
+    threadId: string,
+    terminalId: string,
+  ) => Effect.Effect<TerminalSessionActivity | null>;
 
   /**
    * Subscribe to terminal runtime events.

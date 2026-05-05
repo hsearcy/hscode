@@ -14,6 +14,7 @@ import {
   TerminalWriteInput,
   type TerminalEvent,
   type TerminalSessionSnapshot,
+  type TerminalSessionStatus,
 } from "@t3tools/contracts";
 import {
   consumeTerminalIdentityInput,
@@ -1190,6 +1191,27 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     });
   }
 
+  getSessionActivity(
+    threadId: string,
+    terminalId: string,
+  ): {
+    status: TerminalSessionStatus;
+    hasRunningSubprocess: boolean;
+    detectedCliKind: TerminalCliKind | null;
+    managedAgentRunning: boolean;
+    managedAgentObserved: boolean;
+  } | null {
+    const session = this.sessions.get(toSessionKey(threadId, terminalId));
+    if (!session) return null;
+    return {
+      status: session.status,
+      hasRunningSubprocess: session.hasRunningSubprocess,
+      detectedCliKind: session.detectedCliKind,
+      managedAgentRunning: session.managedAgentRunning,
+      managedAgentObserved: session.managedAgentObserved,
+    };
+  }
+
   async close(raw: TerminalCloseInput): Promise<void> {
     const input = decodeTerminalCloseInput(raw);
     await this.runWithThreadLock(input.threadId, async () => {
@@ -2061,6 +2083,8 @@ export const TerminalManagerLive = Layer.effect(
           try: () => runtime.close(input),
           catch: (cause) => new TerminalError({ message: "Failed to close terminal", cause }),
         }),
+      getSessionActivity: (threadId, terminalId) =>
+        Effect.sync(() => runtime.getSessionActivity(threadId, terminalId)),
       subscribe: (listener) =>
         Effect.sync(() => {
           runtime.on("event", listener);
