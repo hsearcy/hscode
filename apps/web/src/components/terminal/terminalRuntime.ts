@@ -2,6 +2,7 @@
 // Purpose: Own the long-lived xterm runtime lifecycle behind the terminal runtime registry.
 // Layer: Terminal runtime infrastructure
 
+import { CanvasAddon } from "@xterm/addon-canvas";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
@@ -48,7 +49,9 @@ const WRITE_BATCH_SIZE_LIMIT = 262_144;
 const WRITE_BATCH_MAX_LATENCY_MS = 50;
 
 // Once WebGL fails, skip it for subsequent terminals in this renderer process.
-let suggestedRendererType: "webgl" | "dom" | undefined;
+// Canvas is the next-best fallback; only drop to DOM if both fail (which keeps
+// xterm functional even on environments without GPU/2D-canvas access).
+let suggestedRendererType: "webgl" | "canvas" | "dom" | undefined;
 
 function clearBackendResizeTimer(entry: TerminalRuntimeEntry): void {
   if (entry.resizeDispatchTimer !== null) {
@@ -184,6 +187,11 @@ function runTerminalResize(
   if (clearTextureAtlas) {
     (
       entry.webglAddon as unknown as {
+        clearTextureAtlas?: () => void;
+      } | null
+    )?.clearTextureAtlas?.();
+    (
+      entry.canvasAddon as unknown as {
         clearTextureAtlas?: () => void;
       } | null
     )?.clearTextureAtlas?.();
@@ -350,6 +358,8 @@ function disposeWebglAddon(entry: TerminalRuntimeEntry): void {
   cancelPendingWebglLoad(entry);
   entry.webglAddon?.dispose();
   entry.webglAddon = null;
+  entry.canvasAddon?.dispose();
+  entry.canvasAddon = null;
 }
 
 function maybeLoadWebglAddon(entry: TerminalRuntimeEntry): void {
@@ -358,6 +368,7 @@ function maybeLoadWebglAddon(entry: TerminalRuntimeEntry): void {
     !ENABLE_TERMINAL_WEBGL ||
     suggestedRendererType === "dom" ||
     entry.webglAddon !== null ||
+    entry.canvasAddon !== null ||
     entry.webglLoadFrame !== null ||
     !entry.viewState.isVisible
   ) {
@@ -371,25 +382,40 @@ function maybeLoadWebglAddon(entry: TerminalRuntimeEntry): void {
       !ENABLE_TERMINAL_WEBGL ||
       suggestedRendererType === "dom" ||
       entry.webglAddon !== null ||
+      entry.canvasAddon !== null ||
       !entry.viewState.isVisible
     ) {
       return;
     }
 
+    if (suggestedRendererType !== "canvas") {
+      try {
+        const nextWebglAddon = new WebglAddon();
+        nextWebglAddon.onContextLoss(() => {
+          nextWebglAddon.dispose();
+          if (entry.webglAddon === nextWebglAddon) {
+            entry.webglAddon = null;
+          }
+          entry.terminal.refresh(0, Math.max(0, entry.terminal.rows - 1));
+        });
+        entry.terminal.loadAddon(nextWebglAddon);
+        entry.webglAddon = nextWebglAddon;
+        suggestedRendererType = "webgl";
+        return;
+      } catch (error) {
+        console.error("[terminal] WebGL renderer failed, trying canvas", error);
+        suggestedRendererType = "canvas";
+      }
+    }
+
     try {
-      const nextWebglAddon = new WebglAddon();
-      nextWebglAddon.onContextLoss(() => {
-        nextWebglAddon.dispose();
-        if (entry.webglAddon === nextWebglAddon) {
-          entry.webglAddon = null;
-        }
-        entry.terminal.refresh(0, Math.max(0, entry.terminal.rows - 1));
-      });
-      entry.terminal.loadAddon(nextWebglAddon);
-      entry.webglAddon = nextWebglAddon;
-    } catch {
+      const nextCanvasAddon = new CanvasAddon();
+      entry.terminal.loadAddon(nextCanvasAddon);
+      entry.canvasAddon = nextCanvasAddon;
+    } catch (error) {
+      console.error("[terminal] Canvas renderer failed, falling back to DOM", error);
       suggestedRendererType = "dom";
-      entry.webglAddon = null;
+      entry.canvasAddon = null;
     }
   });
 }
@@ -563,6 +589,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     fitAddon,
     searchAddon,
     webglAddon: null,
+    canvasAddon: null,
     outputIdentityBuffer: "",
     titleInputBuffer: "",
     hasHandledExit: false,
