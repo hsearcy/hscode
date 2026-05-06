@@ -520,6 +520,46 @@ async function sendTerminalInput(
   }
 }
 
+async function pasteFromClipboard(entry: TerminalRuntimeEntry, terminal: Terminal): Promise<void> {
+  const cb = navigator.clipboard;
+  if (!cb) return;
+
+  // Detect image clipboard contents so the raw Ctrl+V byte (\x16) can be
+  // forwarded to the PTY — the inner CLI's own paste handler then reads the
+  // image from the OS clipboard.
+  if (typeof cb.read === "function") {
+    try {
+      const items = await cb.read();
+      const hasImage = items.some((item) => item.types.some((t) => t.startsWith("image/")));
+      if (hasImage) {
+        await sendTerminalInput(entry, "\x16", "Failed to paste");
+        return;
+      }
+      for (const item of items) {
+        if (item.types.includes("text/plain")) {
+          const blob = await item.getType("text/plain");
+          const text = await blob.text();
+          if (text) await sendTerminalInput(entry, text, "Failed to paste");
+          return;
+        }
+      }
+      return;
+    } catch {
+      // Permission or unsupported MIME — fall back to readText below.
+    }
+  }
+
+  try {
+    const text = await cb.readText();
+    if (text) await sendTerminalInput(entry, text, "Failed to paste");
+  } catch (error) {
+    writeSystemMessage(
+      terminal,
+      `Paste failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export function syncRuntimeConfig(
   entry: TerminalRuntimeEntry,
   config: TerminalRuntimeConfig,
@@ -648,7 +688,21 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
   });
 
   const handlePaste = (event: ClipboardEvent) => {
-    const text = event.clipboardData?.getData("text/plain");
+    const data = event.clipboardData;
+    if (!data) return;
+
+    const hasImage =
+      Array.from(data.types ?? []).some((type) => type.startsWith("image/")) ||
+      (data.files && data.files.length > 0);
+    if (hasImage) {
+      event.preventDefault();
+      // Forward raw Ctrl+V so the inner CLI (Claude, Codex) reads the image
+      // from the OS clipboard with its own paste handler.
+      void sendTerminalInput(entry, "\x16", "Failed to paste");
+      return;
+    }
+
+    const text = data.getData("text/plain");
     if (!text) return;
     event.preventDefault();
     void sendTerminalInput(entry, text, "Failed to paste");
@@ -667,17 +721,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     ) {
       event.preventDefault();
       event.stopPropagation();
-      void navigator.clipboard
-        ?.readText()
-        .then((text) => {
-          if (text) void sendTerminalInput(entry, text, "Failed to paste");
-        })
-        .catch((error) => {
-          writeSystemMessage(
-            terminal,
-            `Paste failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+      void pasteFromClipboard(entry, terminal);
       return false;
     }
 
