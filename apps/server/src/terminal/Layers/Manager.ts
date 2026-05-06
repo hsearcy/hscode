@@ -14,6 +14,7 @@ import {
   TerminalWriteInput,
   type TerminalEvent,
   type TerminalSessionSnapshot,
+  type TerminalSessionStatus,
 } from "@t3tools/contracts";
 import {
   consumeTerminalIdentityInput,
@@ -22,6 +23,7 @@ import {
   deriveTerminalTitleSignalIdentity,
   terminalCliKindFromValue,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
+  T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_KIND_ENV_KEY,
   type TerminalActivityState,
   type TerminalAgentHookEventType,
@@ -470,8 +472,53 @@ function shouldStripCsiSequence(body: string, finalByte: string): boolean {
 
 function shouldStripOscSequence(content: string): boolean {
   return (
-    /^(10|11|12);(?:\?|rgb:)/.test(content) || content.startsWith(T3CODE_TERMINAL_HOOK_OSC_PREFIX)
+    /^(10|11|12);(?:\?|rgb:)/.test(content) ||
+    content.startsWith(T3CODE_TERMINAL_HOOK_OSC_PREFIX) ||
+    content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)
   );
+}
+
+interface ClaudeSessionMetaSignal {
+  sessionId: string;
+  summary: string | null;
+  cwd: string | null;
+}
+
+function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSignal | null {
+  if (!content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)) {
+    return null;
+  }
+  const encoded = content.slice(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX.length).trim();
+  if (encoded.length === 0) {
+    return null;
+  }
+  let json: string;
+  try {
+    json = Buffer.from(encoded, "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+  const record = parsed as { sessionId?: unknown; summary?: unknown; cwd?: unknown };
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  if (sessionId.length === 0) {
+    return null;
+  }
+  const summaryRaw = typeof record.summary === "string" ? record.summary.trim() : "";
+  const cwdRaw = typeof record.cwd === "string" ? record.cwd.trim() : "";
+  return {
+    sessionId,
+    summary: summaryRaw.length > 0 ? summaryRaw : null,
+    cwd: cwdRaw.length > 0 ? cwdRaw : null,
+  };
 }
 
 function extractOscTitle(content: string): string | null {
@@ -540,12 +587,14 @@ function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string;
   titleSignals: string[];
   hookEvents: TerminalAgentHookEventType[];
+  claudeMetaSignals: ClaudeSessionMetaSignal[];
 } {
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
   const titleSignals: string[] = [];
   const hookEvents: TerminalAgentHookEventType[] = [];
+  const claudeMetaSignals: ClaudeSessionMetaSignal[] = [];
 
   const append = (value: string) => {
     visibleText += value;
@@ -562,6 +611,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
 
@@ -585,6 +635,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
+            claudeMetaSignals,
           };
         }
         continue;
@@ -603,6 +654,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
+            claudeMetaSignals,
           };
         }
         const sequence = input.slice(index, terminatorIndex);
@@ -615,6 +667,10 @@ function sanitizeTerminalHistoryChunk(
           const titleSignal = extractOscTitle(content);
           if (titleSignal) {
             titleSignals.push(titleSignal);
+          }
+          const claudeMeta = extractClaudeSessionMetaSignal(content);
+          if (claudeMeta) {
+            claudeMetaSignals.push(claudeMeta);
           }
         }
         if (nextCodePoint !== 0x5d || !shouldStripOscSequence(content)) {
@@ -631,6 +687,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       append(input.slice(index, escapeSequenceEndIndex));
@@ -658,6 +715,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       continue;
@@ -671,6 +729,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
+          claudeMetaSignals,
         };
       }
       const sequence = input.slice(index, terminatorIndex);
@@ -678,6 +737,10 @@ function sanitizeTerminalHistoryChunk(
       const hookEvent = extractOscHookEvent(content);
       if (hookEvent) {
         hookEvents.push(hookEvent);
+      }
+      const claudeMeta = codePoint === 0x9d ? extractClaudeSessionMetaSignal(content) : null;
+      if (claudeMeta) {
+        claudeMetaSignals.push(claudeMeta);
       }
       if (codePoint === 0x9d) {
         const titleSignal = extractOscTitle(content);
@@ -696,7 +759,13 @@ function sanitizeTerminalHistoryChunk(
     index += 1;
   }
 
-  return { visibleText, pendingControlSequence: "", titleSignals, hookEvents };
+  return {
+    visibleText,
+    pendingControlSequence: "",
+    titleSignals,
+    hookEvents,
+    claudeMetaSignals,
+  };
 }
 
 function legacySafeThreadId(threadId: string): string {
@@ -916,13 +985,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (!existing) {
         await this.flushPersistQueue(input.threadId, input.terminalId);
         const history = await this.readHistory(input.threadId, input.terminalId);
+        const persistedCwd = await this.readPersistedCwd(input.threadId, input.terminalId);
+        const spawnCwd = persistedCwd ?? input.cwd;
         const cols = input.cols ?? DEFAULT_OPEN_COLS;
         const rows = input.rows ?? DEFAULT_OPEN_ROWS;
         const historyMetrics = measureHistory(history);
         const session: TerminalSessionState = {
           threadId: input.threadId,
           terminalId: input.terminalId,
-          cwd: input.cwd,
+          cwd: spawnCwd,
+          requestedCwd: input.cwd,
           status: "starting",
           pid: null,
           history,
@@ -954,7 +1026,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         };
         this.sessions.set(sessionKey, session);
         this.evictInactiveSessionsIfNeeded();
-        await this.startSession(session, { ...input, cols, rows }, "started");
+        await this.startSession(session, { ...input, cwd: spawnCwd, cols, rows }, "started");
         return this.snapshot(session);
       }
 
@@ -965,12 +1037,14 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       const runtimeEnvChanged =
         JSON.stringify(currentRuntimeEnv) !== JSON.stringify(nextRuntimeEnv);
 
-      if (existing.cwd !== input.cwd || runtimeEnvChanged) {
+      if (existing.requestedCwd !== input.cwd || runtimeEnvChanged) {
         this.stopProcess(existing);
         existing.cwd = input.cwd;
+        existing.requestedCwd = input.cwd;
         existing.runtimeEnv = nextRuntimeEnv;
         resetSessionHistory(existing);
         await this.persistHistory(existing.threadId, existing.terminalId, existing.history);
+        await this.clearPersistedCwd(existing.threadId, existing.terminalId);
       } else if (existing.status === "exited" || existing.status === "error") {
         existing.runtimeEnv = nextRuntimeEnv;
         resetSessionHistory(existing);
@@ -1069,6 +1143,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           threadId: input.threadId,
           terminalId: input.terminalId,
           cwd: input.cwd,
+          requestedCwd: input.cwd,
           status: "starting",
           pid: null,
           history: "",
@@ -1103,8 +1178,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       } else {
         this.stopProcess(session);
         session.cwd = input.cwd;
+        session.requestedCwd = input.cwd;
         session.runtimeEnv = normalizedRuntimeEnv(input.env);
       }
+      await this.clearPersistedCwd(input.threadId, input.terminalId);
 
       if (!session) {
         throw new Error(
@@ -1120,6 +1197,27 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       await this.startSession(session, { ...input, cols, rows }, "restarted");
       return this.snapshot(session);
     });
+  }
+
+  getSessionActivity(
+    threadId: string,
+    terminalId: string,
+  ): {
+    status: TerminalSessionStatus;
+    hasRunningSubprocess: boolean;
+    detectedCliKind: TerminalCliKind | null;
+    managedAgentRunning: boolean;
+    managedAgentObserved: boolean;
+  } | null {
+    const session = this.sessions.get(toSessionKey(threadId, terminalId));
+    if (!session) return null;
+    return {
+      status: session.status,
+      hasRunningSubprocess: session.hasRunningSubprocess,
+      detectedCliKind: session.detectedCliKind,
+      managedAgentRunning: session.managedAgentRunning,
+      managedAgentObserved: session.managedAgentObserved,
+    };
   }
 
   async close(raw: TerminalCloseInput): Promise<void> {
@@ -1327,6 +1425,17 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         session.hasRunningSubprocess = nextManagedAgentRunning;
         this.emitActivityEvent(session);
       }
+    }
+    for (const claudeMeta of sanitized.claudeMetaSignals) {
+      this.emitEvent({
+        type: "claude-session",
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+        createdAt: new Date().toISOString(),
+        sessionId: claudeMeta.sessionId,
+        summary: claudeMeta.summary,
+        cwd: claudeMeta.cwd,
+      });
     }
     const titleSignalCliKind =
       sanitized.titleSignals
@@ -1683,7 +1792,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   }
 
   private async deleteHistory(threadId: string, terminalId: string): Promise<void> {
-    const deletions = [fs.promises.rm(this.historyPath(threadId, terminalId), { force: true })];
+    const deletions = [
+      fs.promises.rm(this.historyPath(threadId, terminalId), { force: true }),
+      fs.promises.rm(this.cwdSidecarPath(threadId, terminalId), { force: true }),
+    ];
     if (terminalId === DEFAULT_TERMINAL_ID) {
       deletions.push(fs.promises.rm(this.legacyHistoryPath(threadId), { force: true }));
     }
@@ -1793,6 +1905,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           if (!liveSession || liveSession.status !== "running" || liveSession.pid !== terminalPid) {
             return;
           }
+
+          const liveCwd = await this.readLiveProcessCwd(terminalPid);
+          if (liveCwd && liveCwd !== liveSession.cwd) {
+            liveSession.cwd = liveCwd;
+            void this.persistCwdSidecar(liveSession.threadId, liveSession.terminalId, liveCwd);
+          }
+
           if (
             liveSession.hasRunningSubprocess === hasRunningSubprocess &&
             liveSession.detectedCliKind === terminalCliKind
@@ -1858,6 +1977,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         .filter(
           (name) =>
             name === `${toSafeThreadId(threadId)}.log` ||
+            name === `${toSafeThreadId(threadId)}.log.cwd` ||
             name === `${legacySafeThreadId(threadId)}.log` ||
             name.startsWith(threadPrefix),
         )
@@ -1915,6 +2035,75 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       return path.join(this.logsDir, `${threadPart}.log`);
     }
     return path.join(this.logsDir, `${threadPart}_${toSafeTerminalId(terminalId)}.log`);
+  }
+
+  private cwdSidecarPath(threadId: string, terminalId: string): string {
+    return `${this.historyPath(threadId, terminalId)}.cwd`;
+  }
+
+  private async readPersistedCwd(threadId: string, terminalId: string): Promise<string | null> {
+    try {
+      const raw = await fs.promises.readFile(this.cwdSidecarPath(threadId, terminalId), "utf8");
+      const trimmed = raw.trim();
+      if (!trimmed) return null;
+      const stats = await fs.promises.stat(trimmed).catch(() => null);
+      if (!stats || !stats.isDirectory()) return null;
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  private async clearPersistedCwd(threadId: string, terminalId: string): Promise<void> {
+    try {
+      await fs.promises.rm(this.cwdSidecarPath(threadId, terminalId), { force: true });
+    } catch {
+      // best effort
+    }
+  }
+
+  private async persistCwdSidecar(
+    threadId: string,
+    terminalId: string,
+    cwd: string,
+  ): Promise<void> {
+    try {
+      await fs.promises.writeFile(this.cwdSidecarPath(threadId, terminalId), cwd, "utf8");
+    } catch (error) {
+      this.logger.warn("failed to persist terminal cwd sidecar", {
+        threadId,
+        terminalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async readLiveProcessCwd(pid: number): Promise<string | null> {
+    if (process.platform === "linux") {
+      try {
+        return await fs.promises.readlink(`/proc/${pid}/cwd`);
+      } catch {
+        return null;
+      }
+    }
+    if (process.platform === "darwin") {
+      try {
+        const result = await runProcess("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+          allowNonZeroExit: true,
+        });
+        if (result.code !== 0) return null;
+        for (const line of result.stdout.split("\n")) {
+          if (line.startsWith("n")) {
+            const candidate = line.slice(1).trim();
+            if (candidate.length > 0) return candidate;
+          }
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   private legacyHistoryPath(threadId: string): string {
@@ -1982,6 +2171,8 @@ export const TerminalManagerLive = Layer.effect(
           try: () => runtime.close(input),
           catch: (cause) => new TerminalError({ message: "Failed to close terminal", cause }),
         }),
+      getSessionActivity: (threadId, terminalId) =>
+        Effect.sync(() => runtime.getSessionActivity(threadId, terminalId)),
       subscribe: (listener) =>
         Effect.sync(() => {
           runtime.on("event", listener);

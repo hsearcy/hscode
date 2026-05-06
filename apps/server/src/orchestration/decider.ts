@@ -282,6 +282,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           forkSourceThreadId: null,
           lastKnownPr: command.lastKnownPr,
           handoff: null,
+          ...(command.cliKind !== undefined ? { cliKind: command.cliKind } : {}),
+          ...(command.interactionMode === "terminal-cli"
+            ? {
+                cliSessionId: command.cliSessionId ?? crypto.randomUUID(),
+              }
+            : {}),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -614,6 +620,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.subagentRole !== undefined ? { subagentRole: command.subagentRole } : {}),
           ...(command.handoff !== undefined ? { handoff: command.handoff } : {}),
           ...(command.lastKnownPr !== undefined ? { lastKnownPr: command.lastKnownPr } : {}),
+          ...(command.cliSessionId !== undefined ? { cliSessionId: command.cliSessionId } : {}),
           updatedAt: occurredAt,
         },
       };

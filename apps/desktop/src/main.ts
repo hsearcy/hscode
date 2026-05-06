@@ -14,6 +14,7 @@ import {
   nativeImage,
   nativeTheme,
   protocol,
+  screen,
   session,
   shell,
   systemPreferences,
@@ -106,6 +107,15 @@ const STATE_DIR = Path.join(BASE_DIR, "userdata");
 const DESKTOP_SCHEME = "t3";
 const ROOT_DIR = Path.resolve(__dirname, "../../..");
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isRunningOnWSL = (() => {
+  if (process.platform !== "linux") return false;
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft|wsl/i.test(FS.readFileSync("/proc/version", "utf8"));
+  } catch {
+    return false;
+  }
+})();
 const APP_DISPLAY_NAME = isDevelopment ? "DP Code (Dev)" : "DP Code (Alpha)";
 const APP_USER_MODEL_ID = isDevelopment ? "com.t3tools.dpcode.dev" : "com.t3tools.dpcode";
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
@@ -1796,6 +1806,67 @@ function registerIpcHandlers(): void {
         ...(typeof input?.threadId === "string" ? { threadId: input.threadId } : {}),
       }),
   );
+  const focusedOrMain = () => BrowserWindow.getFocusedWindow() ?? mainWindow;
+
+  ipcMain.removeAllListeners("desktop:window-minimize");
+  ipcMain.on("desktop:window-minimize", () => {
+    focusedOrMain()?.minimize();
+  });
+
+  ipcMain.removeAllListeners("desktop:window-toggle-maximize");
+  ipcMain.on("desktop:window-toggle-maximize", () => {
+    const w = focusedOrMain();
+    if (!w) return;
+    if (process.platform === "linux") {
+      // Frameless Electron windows on Linux/X11 don't maximize cleanly via the
+      // WM (the WM offsets by phantom frame extents). Snap to the display's
+      // work area instead. On WSLg, Weston reports workArea == bounds because
+      // it doesn't know about the Windows host taskbar, so we leave a margin.
+      type WithLinuxMaxState = BrowserWindow & {
+        __linuxMaximized?: boolean;
+        __linuxRestoreBounds?: Electron.Rectangle;
+      };
+      const wl = w as WithLinuxMaxState;
+      if (wl.__linuxMaximized) {
+        if (wl.__linuxRestoreBounds) w.setBounds(wl.__linuxRestoreBounds);
+        wl.__linuxMaximized = false;
+      } else {
+        wl.__linuxRestoreBounds = w.getBounds();
+        const display = screen.getDisplayMatching(w.getBounds());
+        const target = { ...display.workArea };
+        if (isRunningOnWSL && target.height === display.bounds.height) {
+          // Reserve room for the Windows host taskbar (default ~48px @ 100% DPI).
+          const reserve = 48;
+          target.height = Math.max(target.height - reserve, 200);
+        }
+        w.setBounds(target);
+        wl.__linuxMaximized = true;
+      }
+      w.webContents.send("desktop:window-maximize-state", wl.__linuxMaximized);
+      return;
+    }
+    if (w.isMaximized()) {
+      w.unmaximize();
+    } else {
+      w.maximize();
+    }
+  });
+
+  ipcMain.removeAllListeners("desktop:window-close");
+  ipcMain.on("desktop:window-close", () => {
+    focusedOrMain()?.close();
+  });
+
+  ipcMain.removeHandler("desktop:window-is-maximized");
+  ipcMain.handle("desktop:window-is-maximized", async () => {
+    const w = focusedOrMain();
+    if (!w) return false;
+    if (process.platform === "linux") {
+      return (w as BrowserWindow & { __linuxMaximized?: boolean }).__linuxMaximized === true;
+    }
+    return w.isMaximized();
+  });
+
   registerDesktopVoiceTranscriptionHandler();
   startBrowserPerformanceLogging();
   void ensureBrowserUsePipeServer().catch((error) => {
@@ -1824,6 +1895,7 @@ function createWindow(): BrowserWindow {
     title: APP_DISPLAY_NAME,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
+    ...(process.platform === "linux" ? { frame: false } : {}),
     vibrancy: "under-window",
     visualEffectState: "active",
     backgroundColor: "#00000000",
@@ -1836,6 +1908,13 @@ function createWindow(): BrowserWindow {
     },
   });
   browserManager.setWindow(window);
+
+  const emitMaximizeState = () => {
+    if (window.isDestroyed()) return;
+    window.webContents.send("desktop:window-maximize-state", window.isMaximized());
+  };
+  window.on("maximize", emitMaximizeState);
+  window.on("unmaximize", emitMaximizeState);
 
   window.webContents.on("context-menu", (event, params) => {
     event.preventDefault();
@@ -1872,6 +1951,38 @@ function createWindow(): BrowserWindow {
 
     Menu.buildFromTemplate(menuTemplate).popup({ window });
   });
+
+  // Recover the main window when the renderer dies or hangs (common after the
+  // host display sleeps on Linux/WSLg, leaving a black window until reload).
+  let reloadingAfterCrash = false;
+  const reloadAfterCrash = (reason: string, detail?: Record<string, unknown>) => {
+    if (window.isDestroyed() || reloadingAfterCrash) return;
+    reloadingAfterCrash = true;
+    console.warn(`[desktop] main window renderer ${reason}; reloading`, detail);
+    try {
+      window.webContents.reloadIgnoringCache();
+    } catch (error) {
+      console.error("[desktop] failed to reload main window after renderer loss", error);
+      reloadingAfterCrash = false;
+    }
+  };
+  window.webContents.on("did-finish-load", () => {
+    reloadingAfterCrash = false;
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    reloadAfterCrash("process gone", { reason: details.reason, exitCode: details.exitCode });
+  });
+  window.on("unresponsive", () => {
+    reloadAfterCrash("unresponsive");
+  });
+  window.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      if (errorCode === -3) return; // ERR_ABORTED — navigation superseded; ignore.
+      reloadAfterCrash("did-fail-load", { errorCode, errorDescription, validatedURL });
+    },
+  );
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     const externalUrl = getSafeExternalUrl(url);
@@ -1922,10 +2033,17 @@ function configureMediaPermissions(): void {
         ? systemPreferences.getMediaAccessStatus("microphone") === "granted"
         : false;
     }
+    if (permission === "clipboard-read" || permission === "clipboard-sanitized-write") {
+      return true;
+    }
     return false;
   });
 
   defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === "clipboard-read" || permission === "clipboard-sanitized-write") {
+      callback(true);
+      return;
+    }
     if (permission !== "media") {
       callback(false);
       return;

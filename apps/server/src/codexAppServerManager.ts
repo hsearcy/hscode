@@ -540,6 +540,11 @@ function mapCodexRuntimeMode(runtimeMode: RuntimeMode): {
         approvalPolicy: "untrusted",
         sandbox: "read-only",
       };
+    case "auto":
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+      };
     case "full-access":
     default:
       return {
@@ -559,6 +564,11 @@ function mapCodexRuntimeModeToTurnOverrides(runtimeMode: RuntimeMode): {
       return {
         approvalPolicy: "untrusted",
         sandboxPolicy: { type: "readOnly" },
+      };
+    case "auto":
+      return {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "workspaceWrite" },
       };
     case "full-access":
     default:
@@ -1056,8 +1066,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     if (input.effort) {
       turnStartParams.effort = input.effort;
     }
+    const codexInteractionMode: "default" | "plan" | undefined =
+      input.interactionMode === "default" || input.interactionMode === "plan"
+        ? input.interactionMode
+        : undefined;
     const collaborationMode = buildCodexCollaborationMode({
-      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      ...(codexInteractionMode !== undefined ? { interactionMode: codexInteractionMode } : {}),
       ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
       ...(input.effort !== undefined ? { effort: input.effort } : {}),
     });

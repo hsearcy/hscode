@@ -23,6 +23,7 @@ import type {
   ProjectKind,
   RuntimeMode,
   ThreadEnvironmentMode,
+  TerminalCliKind,
 } from "@t3tools/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
@@ -165,6 +166,7 @@ export interface Thread extends ThreadWorkspaceState {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  cliKind?: TerminalCliKind | null;
   session: ThreadSession | null;
   messages: ChatMessage[];
   proposedPlans: ProposedPlan[];
@@ -198,6 +200,7 @@ export interface ThreadShell extends ThreadWorkspaceState {
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  cliKind?: TerminalCliKind | null;
   error: string | null;
   createdAt: string;
   archivedAt?: string | null;
@@ -227,6 +230,7 @@ export interface SidebarThreadSummary {
   title: string;
   modelSelection: ModelSelection;
   interactionMode: ProviderInteractionMode;
+  cliKind?: TerminalCliKind | null;
   envMode?: ThreadEnvironmentMode | undefined;
   branch: string | null;
   worktreePath: string | null;

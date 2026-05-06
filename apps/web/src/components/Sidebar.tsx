@@ -61,6 +61,7 @@ import {
   ThreadId,
   type GitStatusResult,
   type ResolvedKeybindingsConfig,
+  type TerminalCliKind,
 } from "@t3tools/contracts";
 import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -127,6 +128,7 @@ import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { useTerminalActivityStore } from "../terminalActivityStore";
 import { toastManager } from "./ui/toast";
 import {
   normalizeSidebarProjectThreadListCwd,
@@ -372,6 +374,29 @@ function ProviderGlyph({ provider, className }: { provider: ProviderKind; classN
 }
 function WorktreeBadgeGlyph({ className }: { className?: string }) {
   return <LuSplit aria-hidden="true" className={cn("rotate-90", className)} />;
+}
+
+function TerminalCliGlyph({ cliKind }: { cliKind: TerminalCliKind | null }) {
+  const containerClass = "relative inline-flex size-3.5 shrink-0 items-center justify-center";
+  if (cliKind === "claude") {
+    return (
+      <span className={containerClass}>
+        <ClaudeAI aria-hidden="true" className="size-3.5 text-foreground opacity-80" />
+      </span>
+    );
+  }
+  if (cliKind === "codex") {
+    return (
+      <span className={containerClass}>
+        <OpenAI aria-hidden="true" className="size-3.5 text-muted-foreground/60" />
+      </span>
+    );
+  }
+  return (
+    <span className={containerClass}>
+      <TerminalIcon aria-hidden="true" className="size-3.5 text-teal-600/85" />
+    </span>
+  );
 }
 
 function resolveWorktreeBadgeLabel(
@@ -1110,6 +1135,7 @@ export default function Sidebar() {
   const deleteWorkspace = useWorkspaceStore((store) => store.deleteWorkspace);
   const reorderWorkspace = useWorkspaceStore((store) => store.reorderWorkspace);
   const homeDir = useWorkspaceStore((store) => store.homeDir);
+  const lastVisitedWorkspaceId = useWorkspaceStore((store) => store.lastVisitedWorkspaceId);
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
   const isOnSettings = useLocation({ select: (loc) => loc.pathname === "/settings" });
@@ -1242,6 +1268,28 @@ export default function Sidebar() {
       return next;
     });
   }, []);
+  // Roll up each thread's terminal agent states into a single "needs your
+  // eyes" signal: attention (permission request) wins over review (turn done).
+  const terminalAttentionByThreadId = useMemo(() => {
+    const result: Record<string, "attention" | "review"> = {};
+    for (const [threadId, state] of Object.entries(terminalStateByThreadId)) {
+      let worst: "attention" | "review" | null = null;
+      for (const value of Object.values(state.terminalAttentionStatesById)) {
+        if (value === "attention") {
+          worst = "attention";
+          break;
+        }
+        if (value === "review") {
+          worst = "review";
+        }
+      }
+      if (worst) {
+        result[threadId] = worst;
+      }
+    }
+    return result;
+  }, [terminalStateByThreadId]);
+
   const resolveThreadStatusForSidebar = useCallback(
     (thread: SidebarThreadSummary) =>
       resolveThreadStatusPill({
@@ -1251,8 +1299,9 @@ export default function Sidebar() {
         },
         hasPendingApprovals: thread.hasPendingApprovals,
         hasPendingUserInput: thread.hasPendingUserInput,
+        terminalAttentionState: terminalAttentionByThreadId[thread.id] ?? null,
       }),
-    [dismissedThreadStatusKeyByThreadId],
+    [dismissedThreadStatusKeyByThreadId, terminalAttentionByThreadId],
   );
 
   useEffect(() => {
@@ -1693,7 +1742,12 @@ export default function Sidebar() {
   const handleSidebarViewChange = useCallback(
     (view: "threads" | "workspace") => {
       if (view === "workspace") {
-        const fallbackWorkspaceId = workspacePages[0]?.id;
+        const restoredWorkspaceId =
+          lastVisitedWorkspaceId &&
+          workspacePages.some((workspace) => workspace.id === lastVisitedWorkspaceId)
+            ? lastVisitedWorkspaceId
+            : null;
+        const fallbackWorkspaceId = restoredWorkspaceId ?? workspacePages[0]?.id;
         if (!fallbackWorkspaceId) {
           return;
         }
@@ -1721,6 +1775,7 @@ export default function Sidebar() {
     [
       handleNewChat,
       lastThreadRoute,
+      lastVisitedWorkspaceId,
       navigate,
       navigateToWorkspace,
       routeWorkspaceId,
@@ -3288,16 +3343,37 @@ export default function Sidebar() {
     () => groupSidebarThreadsByProjectId(sidebarDisplayThreads),
     [sidebarDisplayThreads],
   );
+  // Terminal-cli threads have no chat user messages, so overlay the most
+  // recent local terminal-input timestamp onto `latestUserMessageAt` to make
+  // "sort by last user message" reflect actual terminal activity.
+  const terminalLastInputAtByThreadId = useTerminalActivityStore(
+    (state) => state.lastInputAtByThreadId,
+  );
+  const applyTerminalActivity = useCallback(
+    (thread: SidebarThreadSummary): SidebarThreadSummary => {
+      if (thread.interactionMode !== "terminal-cli") return thread;
+      const inputAt = terminalLastInputAtByThreadId[thread.id];
+      if (!inputAt) return thread;
+      if (thread.latestUserMessageAt && thread.latestUserMessageAt >= inputAt) {
+        return thread;
+      }
+      return { ...thread, latestUserMessageAt: inputAt };
+    },
+    [terminalLastInputAtByThreadId],
+  );
   const sortedSidebarThreadsByProjectId = useMemo(() => {
     const byProjectId = new Map<ProjectId, SidebarThreadSummary[]>();
     for (const [projectId, projectThreads] of sidebarThreadsByProjectId) {
       byProjectId.set(
         projectId,
-        sortThreadsForSidebar(projectThreads, appSettings.sidebarThreadSortOrder),
+        sortThreadsForSidebar(
+          projectThreads.map(applyTerminalActivity),
+          appSettings.sidebarThreadSortOrder,
+        ),
       );
     }
     return byProjectId;
-  }, [appSettings.sidebarThreadSortOrder, sidebarThreadsByProjectId]);
+  }, [applyTerminalActivity, appSettings.sidebarThreadSortOrder, sidebarThreadsByProjectId]);
   const resolveSplitPreview = useCallback(
     (threadId: ThreadId | null): SidebarSplitPreview => {
       const thread = threadId ? (sidebarThreadSummaryById[threadId] ?? null) : null;
@@ -3341,9 +3417,18 @@ export default function Sidebar() {
     [cancelProjectRename, renameProjectLocally],
   );
 
+  const sidebarThreadsForProjectSort = useMemo(
+    () => sidebarThreads.map(applyTerminalActivity),
+    [applyTerminalActivity, sidebarThreads],
+  );
   const sortedProjects = useMemo(
-    () => sortProjectsForSidebar(projects, sidebarThreads, appSettings.sidebarProjectSortOrder),
-    [appSettings.sidebarProjectSortOrder, projects, sidebarThreads],
+    () =>
+      sortProjectsForSidebar(
+        projects,
+        sidebarThreadsForProjectSort,
+        appSettings.sidebarProjectSortOrder,
+      ),
+    [appSettings.sidebarProjectSortOrder, projects, sidebarThreadsForProjectSort],
   );
   const chatProjects = useMemo(
     () => sortedProjects.filter((project) => isHomeChatContainerProject(project, homeDir)),
@@ -3878,6 +3963,8 @@ export default function Sidebar() {
           </div>
           {threadEntryPoint === "terminal" ? (
             <TerminalIcon aria-hidden="true" className="size-3.5 shrink-0 text-teal-600/85" />
+          ) : thread.interactionMode === "terminal-cli" ? (
+            <TerminalCliGlyph cliKind={thread.cliKind ?? null} />
           ) : (
             <ProviderAvatarWithTerminal
               provider={thread.modelSelection.provider}

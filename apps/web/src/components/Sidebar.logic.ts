@@ -218,8 +218,12 @@ export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
+  // Worst-case agent state across the thread's terminals. Terminal threads
+  // bypass the orchestration latestTurn signal, so this is the equivalent
+  // "needs your eyes" gate for them.
+  terminalAttentionState?: "attention" | "review" | null;
 }): ThreadStatusPill | null {
-  const { hasPendingApprovals, hasPendingUserInput, thread } = input;
+  const { hasPendingApprovals, hasPendingUserInput, terminalAttentionState, thread } = input;
 
   if (hasPendingApprovals) {
     const dismissalKey = createThreadStatusDismissalKey("Pending Approval", thread);
@@ -233,6 +237,16 @@ export function resolveThreadStatusPill(input: {
       pulse: false,
       dismissible: true,
       dismissalKey,
+    };
+  }
+
+  if (terminalAttentionState === "attention") {
+    return {
+      label: "Pending Approval",
+      colorClass: "text-amber-600 dark:text-amber-300/90",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
+      pulse: false,
+      dismissible: false,
     };
   }
 
@@ -320,6 +334,19 @@ export function resolveThreadStatusPill(input: {
       pulse: false,
       dismissible: true,
       ...(dismissalKey ? { dismissalKey } : {}),
+    };
+  }
+
+  // Terminal threads finish via the agent hook (review state) rather than the
+  // orchestration latestTurn signal, so surface the same Completed pill from
+  // that source. The state auto-clears when the user activates the terminal.
+  if (terminalAttentionState === "review") {
+    return {
+      label: "Completed",
+      colorClass: "text-emerald-600 dark:text-emerald-300/90",
+      dotClass: "bg-emerald-500 dark:bg-emerald-300/90",
+      pulse: false,
+      dismissible: false,
     };
   }
 

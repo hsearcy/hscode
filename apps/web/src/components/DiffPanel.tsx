@@ -43,6 +43,7 @@ import { resolveDiffEnvironmentState } from "../lib/threadEnvironment";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useStore } from "../store";
+import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
 import { createProjectSelector, createThreadSelector } from "../storeSelectors";
 import { getProviderStartOptions, useAppSettings } from "../appSettings";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -266,10 +267,30 @@ export default function DiffPanel({
     serverThread?.envMode ?? draftThread?.envMode ?? activeThread?.envMode;
   const resolvedThreadWorktreePath =
     serverThread?.worktreePath ?? draftThread?.worktreePath ?? activeThread?.worktreePath ?? null;
+  // When Claude operates inside a worktree it created itself (e.g. via Agent
+  // isolation: "worktree" or `git worktree add`), the hook surfaces the
+  // directory of the most recent file edit. Only override when that path
+  // falls outside the project root tree — otherwise it's just a deep
+  // subdirectory of the project. Git resolves the surrounding worktree root
+  // from any path inside it, so feeding the parent dir into the diff queries
+  // is enough.
+  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
+    activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
+  );
+  const projectCwd = activeProject?.cwd ?? null;
+  const claudeReportedCwdIsOutsideProject =
+    claudeReportedCwd !== null &&
+    projectCwd !== null &&
+    claudeReportedCwd !== projectCwd &&
+    !claudeReportedCwd.startsWith(`${projectCwd}/`);
+  const claudeEffectiveWorktreePath =
+    resolvedThreadWorktreePath === null && claudeReportedCwdIsOutsideProject
+      ? claudeReportedCwd
+      : resolvedThreadWorktreePath;
   const diffEnvironmentState = resolveDiffEnvironmentState({
-    projectCwd: activeProject?.cwd ?? null,
+    projectCwd,
     envMode: resolvedThreadEnvMode,
-    worktreePath: resolvedThreadWorktreePath,
+    worktreePath: claudeEffectiveWorktreePath,
   });
   const diffEnvironmentPending = diffEnvironmentState.pending;
   const activeCwd = diffEnvironmentState.cwd;

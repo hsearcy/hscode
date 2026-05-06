@@ -258,6 +258,13 @@ export interface DesktopBridge {
     isSupported: () => Promise<boolean>;
     show: (input: DesktopNotificationInput) => Promise<boolean>;
   };
+  window?: {
+    minimize: () => void;
+    toggleMaximize: () => void;
+    close: () => void;
+    isMaximized: () => Promise<boolean>;
+    onMaximizeChange: (listener: (maximized: boolean) => void) => () => void;
+  };
   server?: {
     transcribeVoice: (
       input: ServerVoiceTranscriptionInput,

@@ -2,6 +2,7 @@
 // Purpose: Shared types and stable identity helpers for persistent terminal runtimes.
 // Layer: Terminal runtime infrastructure
 
+import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -55,6 +56,7 @@ export interface TerminalRuntimeEntry {
   fitAddon: FitAddon;
   searchAddon: SearchAddon;
   webglAddon: WebglAddon | null;
+  canvasAddon: CanvasAddon | null;
   outputIdentityBuffer: string;
   titleInputBuffer: string;
   hasHandledExit: boolean;

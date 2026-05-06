@@ -11,6 +11,7 @@ function WorkspaceRouteView() {
     state.workspacePages.find((entry) => entry.id === workspaceId),
   );
   const fallbackWorkspaceId = useWorkspaceStore((state) => state.workspacePages[0]?.id ?? null);
+  const setLastVisitedWorkspaceId = useWorkspaceStore((state) => state.setLastVisitedWorkspaceId);
 
   useEffect(() => {
     if (workspace || !fallbackWorkspaceId) {
@@ -22,6 +23,13 @@ function WorkspaceRouteView() {
       replace: true,
     });
   }, [fallbackWorkspaceId, navigate, workspace]);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+    setLastVisitedWorkspaceId(workspace.id);
+  }, [setLastVisitedWorkspaceId, workspace]);
 
   if (!workspace) {
     return null;

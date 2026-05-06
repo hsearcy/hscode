@@ -623,6 +623,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             updatedAt: event.payload.updatedAt,
             archivedAt: null,
             deletedAt: null,
+            cliKind: event.payload.cliKind ?? null,
+            cliSessionId: event.payload.cliSessionId ?? null,
+            cliLaunchedOnce: false,
           });
           return;
 
@@ -679,6 +682,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               ? { lastKnownPr: event.payload.lastKnownPr }
               : {}),
             ...(event.payload.handoff !== undefined ? { handoff: event.payload.handoff } : {}),
+            ...(event.payload.cliSessionId !== undefined
+              ? { cliSessionId: event.payload.cliSessionId }
+              : {}),
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -1493,9 +1499,7 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             return;
           }
           const requestId =
-            extractActivityRequestId(activity.payload) ??
-            event.metadata.requestId ??
-            null;
+            extractActivityRequestId(activity.payload) ?? event.metadata.requestId ?? null;
           if (requestId === null) {
             return;
           }
@@ -1525,9 +1529,7 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               threadId: Option.isSome(existingRow)
                 ? existingRow.value.threadId
                 : event.payload.threadId,
-              turnId: Option.isSome(existingRow)
-                ? existingRow.value.turnId
-                : activity.turnId,
+              turnId: Option.isSome(existingRow) ? existingRow.value.turnId : activity.turnId,
               status: "resolved",
               decision: resolvedDecision,
               createdAt: Option.isSome(existingRow)

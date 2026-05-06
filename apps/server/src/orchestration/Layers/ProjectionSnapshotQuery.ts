@@ -80,6 +80,7 @@ const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     createBranchFlowCompleted: Schema.Number,
+    cliLaunchedOnce: Schema.Number,
     handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
     lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
     modelSelection: Schema.fromJsonString(ModelSelection),
@@ -313,6 +314,8 @@ function toProjectedThreadShell(input: {
     updatedAt: threadRow.updatedAt,
     archivedAt: threadRow.archivedAt ?? null,
     handoff: threadRow.handoff,
+    ...(threadRow.cliKind != null ? { cliKind: threadRow.cliKind } : {}),
+    ...(threadRow.cliSessionId != null ? { cliSessionId: threadRow.cliSessionId } : {}),
     session: input.session,
   };
 }
@@ -352,6 +355,8 @@ function toProjectedThreadShellFromStoredSummary(input: {
     updatedAt: threadRow.updatedAt,
     archivedAt: threadRow.archivedAt ?? null,
     handoff: threadRow.handoff,
+    ...(threadRow.cliKind != null ? { cliKind: threadRow.cliKind } : {}),
+    ...(threadRow.cliSessionId != null ? { cliSessionId: threadRow.cliSessionId } : {}),
     session: input.session,
   };
 }
@@ -393,6 +398,8 @@ function toProjectedThread(input: {
     archivedAt: threadRow.archivedAt ?? null,
     deletedAt: threadRow.deletedAt,
     handoff: threadRow.handoff,
+    ...(threadRow.cliKind != null ? { cliKind: threadRow.cliKind } : {}),
+    ...(threadRow.cliSessionId != null ? { cliSessionId: threadRow.cliSessionId } : {}),
     latestUserMessageAt: summary.latestUserMessageAt,
     hasPendingApprovals: summary.hasPendingApprovals,
     hasPendingUserInput: summary.hasPendingUserInput,
@@ -493,7 +500,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          cli_kind AS "cliKind",
+          cli_session_id AS "cliSessionId",
+          cli_launched_once AS "cliLaunchedOnce"
         FROM projection_threads
         ORDER BY created_at ASC, thread_id ASC
       `,
@@ -750,7 +760,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          cli_kind AS "cliKind",
+          cli_session_id AS "cliSessionId",
+          cli_launched_once AS "cliLaunchedOnce"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL

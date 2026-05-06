@@ -11,6 +11,7 @@ import { readNativeApi } from "~/nativeApi";
 import { useAppSettings } from "~/appSettings";
 import { Button } from "~/components/ui/button";
 import { SidebarInset } from "~/components/ui/sidebar";
+import { LinuxWindowControls } from "~/components/LinuxWindowControls";
 import { SidebarHeaderNavigationControls } from "~/components/SidebarHeaderNavigationControls";
 import {
   confirmTerminalTabClose,
@@ -445,6 +446,7 @@ export default function WorkspaceView({ workspaceId }: { workspaceId: string }) 
               >
                 <SettingsIcon className="size-3" />
               </Button>
+              <LinuxWindowControls className="ml-1" />
             </div>
           </div>
         </header>

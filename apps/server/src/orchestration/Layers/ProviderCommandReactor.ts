@@ -770,12 +770,15 @@ const make = Effect.gen(function* () {
     readonly modelSelection?: ModelSelection;
     readonly providerOptions?: ProviderStartOptions;
     readonly runtimeMode?: RuntimeMode;
-    readonly interactionMode?: "default" | "plan";
+    readonly interactionMode?: "default" | "plan" | "terminal-cli";
     readonly dispatchMode?: "queue" | "steer";
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
+      return;
+    }
+    if (thread.interactionMode === "terminal-cli") {
       return;
     }
     yield* ensureSessionForThread(input.threadId, input.createdAt, {

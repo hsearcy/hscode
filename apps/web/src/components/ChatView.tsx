@@ -152,6 +152,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useStore } from "../store";
+import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { getThreadFromState } from "../threadDerivation";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -272,9 +273,11 @@ import {
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { ChatHeader } from "./chat/ChatHeader";
+import { LinuxWindowControls } from "./LinuxWindowControls";
 import { SidebarHeaderNavigationControls } from "./SidebarHeaderNavigationControls";
 import { SidebarHeaderTrigger } from "./ui/sidebar";
 import { ChatTranscriptPane } from "./chat/ChatTranscriptPane";
+import ThreadTerminalCliPane from "./ThreadTerminalCliPane";
 import { buildTurnDiffSummaryByAssistantMessageId } from "./chat/MessagesTimeline.logic";
 import { ComposerSlashStatusDialog } from "./chat/ComposerSlashStatusDialog";
 import { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -672,6 +675,7 @@ interface ChatViewProps {
   paneScopeId?: string;
   surfaceMode?: "single" | "split";
   isFocusedPane?: boolean;
+  showWindowControls?: boolean;
   panelState?: SplitViewPanePanelState;
   onToggleDiffPanel?: () => void;
   onToggleBrowserPanel?: () => void;
@@ -686,6 +690,7 @@ export default function ChatView({
   paneScopeId = "single",
   surfaceMode = "single",
   isFocusedPane = true,
+  showWindowControls = true,
   panelState,
   onToggleDiffPanel,
   onToggleBrowserPanel,
@@ -928,6 +933,9 @@ export default function ChatView({
   const storeSetTerminalHeight = useTerminalStateStore((s) => s.setTerminalHeight);
   const storeSetTerminalMetadata = useTerminalStateStore((s) => s.setTerminalMetadata);
   const storeSetTerminalActivity = useTerminalStateStore((s) => s.setTerminalActivity);
+  const storeClearThreadTerminalAttention = useTerminalStateStore(
+    (s) => s.clearThreadTerminalAttention,
+  );
   const storeSplitTerminalLeft = useTerminalStateStore((s) => s.splitTerminalLeft);
   const storeSplitTerminalRight = useTerminalStateStore((s) => s.splitTerminalRight);
   const storeSplitTerminalDown = useTerminalStateStore((s) => s.splitTerminalDown);
@@ -1225,6 +1233,15 @@ export default function ChatView({
     latestTurnSettled,
     markThreadVisited,
   ]);
+
+  // Terminal-thread sidebar attention/review pills should disappear the moment
+  // the user is actually looking at the pane — including stale "attention" state
+  // left over from PreToolUse-style hooks that never paired with a clearing event.
+  useEffect(() => {
+    if (!activeThread?.id) return;
+    if (surfaceMode === "split" && !isFocusedPane) return;
+    storeClearThreadTerminalAttention(activeThread.id);
+  }, [activeThread?.id, isFocusedPane, storeClearThreadTerminalAttention, surfaceMode]);
 
   const sessionProvider = activeThread?.session?.provider ?? null;
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
@@ -1956,11 +1973,28 @@ export default function ChatView({
     latestTurnSettled,
     timelineEntries,
   ]);
+  // When Claude is running in a terminal and operates inside a worktree it
+  // created itself, override the workspace cwd so the header git-status
+  // totals (and other cwd-derived surfaces) reflect that worktree instead of
+  // the shared project root — otherwise every terminal thread shows the same
+  // numbers from projectCwd.
+  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
+    activeThread?.id ? (store.cwdByThreadId[activeThread.id] ?? null) : null,
+  );
+  const projectCwd = activeProject?.cwd ?? null;
+  const claudeEffectiveWorktreePath =
+    resolvedThreadWorktreePath === null &&
+    claudeReportedCwd !== null &&
+    projectCwd !== null &&
+    claudeReportedCwd !== projectCwd &&
+    !claudeReportedCwd.startsWith(`${projectCwd}/`)
+      ? claudeReportedCwd
+      : resolvedThreadWorktreePath;
   const threadWorkspaceCwd = activeProject
     ? resolveSharedThreadWorkspaceCwd({
         projectCwd: activeProject.cwd,
         envMode: resolvedThreadEnvMode,
-        worktreePath: resolvedThreadWorktreePath,
+        worktreePath: claudeEffectiveWorktreePath,
       })
     : null;
   const gitCwd = threadWorkspaceCwd;
@@ -5618,9 +5652,11 @@ export default function ChatView({
       if (queuedTurn.kind === "chat") {
         return onSendRef.current(undefined, dispatchMode, queuedTurn);
       }
+      const planInteractionMode: "default" | "plan" =
+        queuedTurn.interactionMode === "plan" ? "plan" : "default";
       return onSubmitPlanFollowUpRef.current({
         text: queuedTurn.text,
-        interactionMode: queuedTurn.interactionMode,
+        interactionMode: planInteractionMode,
         dispatchMode,
         queuedTurn,
       });
@@ -5827,6 +5863,58 @@ export default function ChatView({
     syncServerReadModel,
     selectedModel,
   ]);
+
+  const handleCreateCliThread = useCallback(
+    async (cliKind: "claude" | "codex") => {
+      const api = readNativeApi();
+      if (!api || !activeProject) {
+        return;
+      }
+      const createdAt = new Date().toISOString();
+      const nextThreadId = newThreadId();
+      const cliLabel = cliKind === "claude" ? "Claude Code" : "Codex";
+      const title = `${cliLabel} — ${activeProjectDisplayName ?? activeProject.name}`;
+      await api.orchestration
+        .dispatchCommand({
+          type: "thread.create",
+          commandId: newCommandId(),
+          threadId: nextThreadId,
+          projectId: activeProject.id,
+          title,
+          modelSelection: selectedModelSelection,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: "terminal-cli",
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+          cliKind,
+          createdAt,
+        })
+        .then(() => api.orchestration.getSnapshot())
+        .then((snapshot) => {
+          syncServerReadModel(snapshot);
+          return navigate({
+            to: "/$threadId",
+            params: { threadId: nextThreadId },
+          });
+        })
+        .catch((err) => {
+          toastManager.add({
+            type: "error",
+            title: "Could not create CLI thread",
+            description:
+              err instanceof Error ? err.message : "An error occurred while creating the thread.",
+          });
+        });
+    },
+    [
+      activeProject,
+      activeProjectDisplayName,
+      navigate,
+      selectedModelSelection,
+      syncServerReadModel,
+    ],
+  );
 
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
@@ -6675,6 +6763,8 @@ export default function ChatView({
           >
             <SidebarHeaderNavigationControls />
             <span className="text-xs text-muted-foreground/50">No active thread</span>
+            <div className="ml-auto" />
+            {showWindowControls && <LinuxWindowControls className="ml-2" />}
           </div>
         )}
         <div className="flex flex-1 items-center justify-center">
@@ -6765,7 +6855,7 @@ export default function ChatView({
   // follow-up prompts and normal chat mode stay visually in sync.
   const taskListAboveComposer = Boolean(activeTaskList && !planSidebarOpen);
 
-  const composerSection = secondaryChromeReady ? (
+  const _composerSection = secondaryChromeReady ? (
     <>
       {activeTaskList && !planSidebarOpen ? (
         <div className="pointer-events-none mx-auto w-full max-w-3xl">
@@ -7372,6 +7462,7 @@ export default function ChatView({
           onNavigateToThread={onNavigateToThread}
           onRenameThread={() => setRenameDialogOpen(true)}
         />
+        {showWindowControls && <LinuxWindowControls className="ml-2" />}
       </header>
 
       <RenameThreadDialog
@@ -7406,7 +7497,9 @@ export default function ChatView({
               terminalWorkspaceTerminalTabActive ? "pointer-events-none invisible" : "",
             )}
           >
-            {isCenteredEmptyLanding ? (
+            {activeThread?.interactionMode === "terminal-cli" ? (
+              <ThreadTerminalCliPane threadId={activeThread.id} />
+            ) : isCenteredEmptyLanding ? (
               <div className="chat-pane-enter flex flex-1 items-center justify-center px-3 sm:px-5">
                 <div className="flex w-full max-w-3xl flex-col justify-center">
                   <div className="flex flex-col items-center gap-4 px-6 pb-5 text-center select-none">
@@ -7432,14 +7525,22 @@ export default function ChatView({
                       )}
                     </h2>
                   </div>
-                  {composerSection}
-                  {isGitRepo ? (
-                    <BranchToolbar {...branchToolbarProps} />
-                  ) : !isEmptyChatLanding ? (
-                    <div className="mx-auto flex w-full max-w-3xl items-center justify-end px-3 pb-3 pt-1">
-                      <RuntimeUsageControls {...runtimeUsageControlsProps} />
-                    </div>
-                  ) : null}
+                  <div className="mx-auto mb-3 flex w-full max-w-3xl items-center justify-center gap-2 px-3">
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={() => void handleCreateCliThread("claude")}
+                    >
+                      Claude Code
+                    </button>
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={() => void handleCreateCliThread("codex")}
+                    >
+                      Codex
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (

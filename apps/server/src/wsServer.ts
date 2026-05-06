@@ -23,6 +23,8 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   type ClientOrchestrationCommand,
   MessageId,
+  type CheckpointRef,
+  TurnId,
   type OrchestrationEvent,
   type ThreadHandoffImportedMessage,
   type OrchestrationReadModel,
@@ -58,10 +60,18 @@ import {
   Struct,
 } from "effect";
 import OS from "node:os";
+import { execFileSync } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { createLogger } from "./logger";
-import { resolveThreadWorkspaceCwd } from "./checkpointing/Utils.ts";
+import {
+  checkpointRefForThreadTurn,
+  checkpointRefForThreadTurnStart,
+  resolveThreadWorkspaceCwd,
+} from "./checkpointing/Utils.ts";
+import { CheckpointStore } from "./checkpointing/Services/CheckpointStore.ts";
+import { parseTurnDiffFilesFromUnifiedDiff } from "./checkpointing/Diffs.ts";
+import { isGitRepository } from "./git/isRepo.ts";
 import { GitManager } from "./git/Services/GitManager.ts";
 import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { Keybindings } from "./keybindings";
@@ -107,6 +117,12 @@ import {
 } from "@t3tools/shared/threadWorkspace";
 import { getProviderUsageSnapshot } from "./providerUsageSnapshot";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
+import {
+  defaultTerminalTitleForCliKind,
+  isGenericTerminalThreadTitle,
+  type TerminalCliKind,
+} from "@t3tools/shared/terminalThreads";
+import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -572,11 +588,13 @@ export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
+  | CheckpointStore
   | OrchestrationReactor
   | ProviderService
   | ProviderDiscoveryService
   | ProviderAdapterRegistry
-  | ProviderHealth;
+  | ProviderHealth
+  | ProjectionThreadRepository;
 
 export type ServerRuntimeServices =
   | ServerCoreRuntimeServices
@@ -686,6 +704,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const providerHealth = yield* ProviderHealth;
   const providerDiscoveryService = yield* ProviderDiscoveryService;
   const providerAdapterRegistry = yield* ProviderAdapterRegistry;
+  const projectionThreadRepository = yield* ProjectionThreadRepository;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1440,10 +1459,335 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   >();
   const runPromise = Effect.runPromiseWith(runtimeServices);
 
+  const CLAUDE_SUMMARY_TITLE_MAX = 48;
+  const isAutoDerivedClaudeTerminalTitle = (title: string | null | undefined): boolean => {
+    if (isGenericTerminalThreadTitle(title)) {
+      return true;
+    }
+    const normalized = (title ?? "").trim().toLowerCase();
+    if (normalized.length === 0) {
+      return true;
+    }
+    const claudeBase = defaultTerminalTitleForCliKind("claude").toLowerCase();
+    if (normalized === claudeBase) {
+      return true;
+    }
+    // Also treat "<base> - <suffix>" / em-dash / en-dash variants as auto-derived,
+    // so threads displayed as "Claude Code - dpcode" still get renamed by Claude summaries.
+    return new RegExp(`^${claudeBase}\\s+[\\-\\u2013\\u2014]\\s+\\S`, "u").test(normalized);
+  };
+  const applyClaudeSessionMeta = Effect.fnUntraced(function* (input: {
+    threadId: string;
+    sessionId: string;
+    summary: string | null;
+  }) {
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return;
+    }
+    const sessionIdChanged = thread.cliSessionId !== input.sessionId;
+    const trimmedSummary = input.summary?.trim() ?? "";
+    const truncatedSummary =
+      trimmedSummary.length > CLAUDE_SUMMARY_TITLE_MAX
+        ? `${trimmedSummary.slice(0, CLAUDE_SUMMARY_TITLE_MAX - 1).trimEnd()}…`
+        : trimmedSummary;
+    const shouldUpdateTitle =
+      truncatedSummary.length > 0 &&
+      truncatedSummary !== thread.title &&
+      isAutoDerivedClaudeTerminalTitle(thread.title);
+    if (!sessionIdChanged && !shouldUpdateTitle) {
+      return;
+    }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+      threadId: ThreadId.makeUnsafe(input.threadId),
+      ...(sessionIdChanged ? { cliSessionId: input.sessionId } : {}),
+      ...(shouldUpdateTitle ? { title: truncatedSummary } : {}),
+    });
+  });
+
+  // Terminal Claude has no provider runtime turns, so the Review/Summary
+  // surfaces stay empty by default. Synthesize a turn lifecycle from terminal
+  // running-state transitions: when the first Claude terminal in a thread
+  // starts running we capture a baseline checkpoint; when the last one stops
+  // we capture the target checkpoint, diff, and dispatch the same
+  // `thread.turn.diff.complete` command CheckpointReactor would.
+  const checkpointStore = yield* CheckpointStore;
+  interface SyntheticTerminalTurn {
+    readonly turnId: TurnId;
+    readonly fromCheckpointRef: CheckpointRef;
+    readonly cwd: string;
+    readonly turnCount: number;
+    readonly startedAt: string;
+  }
+  const claudeRunningTerminalsByThreadId = new Map<string, Set<string>>();
+  const claudeReportedCwdByThreadId = new Map<string, string>();
+  const pendingTerminalTurnByThreadId = new Map<string, SyntheticTerminalTurn>();
+
+  // Capture must always run from the worktree root, not a deep subdirectory.
+  // `git add -A .` only adds files under the cwd, but `read-tree HEAD` reads
+  // the full tree, so capturing from a subdir would write the entire HEAD tree
+  // mixed with the subdir's actual state. If begin and complete happen at
+  // different subdirs (because the most-recent-file path drifts during a
+  // turn), the resulting trees diverge in unrelated paths and the diff blows
+  // up to look like a full branch comparison.
+  const resolveGitToplevel = (cwd: string): string | null => {
+    try {
+      const stdout = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const trimmed = stdout.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const resolveTerminalThreadCwd = Effect.fnUntraced(function* (threadId: string) {
+    // Prefer the cwd Claude reports through the OSC hook (which is the
+    // directory of its most recent edit). Resolve to the surrounding worktree
+    // root so capture covers the whole worktree consistently.
+    const reportedCwd = claudeReportedCwdByThreadId.get(threadId);
+    if (reportedCwd) {
+      const toplevel = resolveGitToplevel(reportedCwd);
+      if (toplevel) {
+        return toplevel;
+      }
+    }
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    if (!thread) {
+      return null;
+    }
+    const projectCwd = resolveThreadWorkspaceCwd({
+      thread: { projectId: thread.projectId, worktreePath: thread.worktreePath },
+      projects: readModel.projects.map((project) => ({
+        id: project.id,
+        workspaceRoot: project.workspaceRoot,
+      })),
+    });
+    if (!projectCwd || !isGitRepository(projectCwd)) {
+      return null;
+    }
+    return projectCwd;
+  });
+
+  const beginTerminalTurn = Effect.fnUntraced(function* (input: {
+    readonly threadId: string;
+    readonly startedAt: string;
+  }) {
+    if (pendingTerminalTurnByThreadId.has(input.threadId)) {
+      logger.info("terminal turn begin skipped (already pending)", {
+        threadId: input.threadId,
+      });
+      return;
+    }
+    const cwd = yield* resolveTerminalThreadCwd(input.threadId);
+    if (!cwd) {
+      logger.warn("terminal turn begin skipped (no cwd)", { threadId: input.threadId });
+      return;
+    }
+    logger.info("terminal turn begin", {
+      threadId: input.threadId,
+      cwd,
+      reportedCwd: claudeReportedCwdByThreadId.get(input.threadId) ?? null,
+    });
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return;
+    }
+    const turnId = TurnId.makeUnsafe(`terminal:${crypto.randomUUID()}`);
+    const fromCheckpointRef = checkpointRefForThreadTurnStart(
+      ThreadId.makeUnsafe(input.threadId),
+      turnId,
+    );
+    const baselineResult = yield* Effect.result(
+      checkpointStore.captureCheckpoint({ cwd, checkpointRef: fromCheckpointRef }),
+    );
+    if (baselineResult._tag === "Failure") {
+      logger.warn("terminal turn baseline capture failed", {
+        threadId: input.threadId,
+        cwd,
+        error: String(baselineResult.failure),
+      });
+      return;
+    }
+    const currentTurnCount = thread.checkpoints.reduce(
+      (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
+      0,
+    );
+    pendingTerminalTurnByThreadId.set(input.threadId, {
+      turnId,
+      fromCheckpointRef,
+      cwd,
+      turnCount: currentTurnCount + 1,
+      startedAt: input.startedAt,
+    });
+  });
+
+  const completeTerminalTurn = Effect.fnUntraced(function* (input: {
+    readonly threadId: string;
+    readonly completedAt: string;
+  }) {
+    const pending = pendingTerminalTurnByThreadId.get(input.threadId);
+    if (!pending) {
+      logger.info("terminal turn complete skipped (no pending)", {
+        threadId: input.threadId,
+      });
+      return;
+    }
+    pendingTerminalTurnByThreadId.delete(input.threadId);
+    // If the resolved worktree drifted between begin and complete (e.g.
+    // baseline was captured at projectCwd before any claude-session event,
+    // then edits landed in a sibling worktree), the two refs would describe
+    // unrelated trees and `git diff` would explode. Skip rather than dispatch
+    // a misleading huge diff.
+    const currentCwd = yield* resolveTerminalThreadCwd(input.threadId);
+    if (currentCwd !== pending.cwd) {
+      logger.warn("terminal turn complete skipped (cwd drift)", {
+        threadId: input.threadId,
+        baselineCwd: pending.cwd,
+        completeCwd: currentCwd,
+      });
+      return;
+    }
+    const targetCheckpointRef = checkpointRefForThreadTurn(
+      ThreadId.makeUnsafe(input.threadId),
+      pending.turnCount,
+    );
+    const captureResult = yield* Effect.result(
+      checkpointStore.captureCheckpoint({
+        cwd: pending.cwd,
+        checkpointRef: targetCheckpointRef,
+      }),
+    );
+    if (captureResult._tag === "Failure") {
+      logger.warn("terminal turn target capture failed", {
+        threadId: input.threadId,
+        cwd: pending.cwd,
+        error: String(captureResult.failure),
+      });
+      return;
+    }
+    const diffResult = yield* Effect.result(
+      checkpointStore.diffCheckpoints({
+        cwd: pending.cwd,
+        fromCheckpointRef: pending.fromCheckpointRef,
+        toCheckpointRef: targetCheckpointRef,
+        fallbackFromToHead: false,
+      }),
+    );
+    if (diffResult._tag === "Failure") {
+      logger.warn("terminal turn diff failed", {
+        threadId: input.threadId,
+        cwd: pending.cwd,
+        error: String(diffResult.failure),
+      });
+      return;
+    }
+    const files = parseTurnDiffFilesFromUnifiedDiff(diffResult.success).map((file) => ({
+      path: file.path,
+      kind: "modified" as const,
+      additions: file.additions,
+      deletions: file.deletions,
+    }));
+    logger.info("terminal turn complete", {
+      threadId: input.threadId,
+      cwd: pending.cwd,
+      turnCount: pending.turnCount,
+      fileCount: files.length,
+      diffBytes: diffResult.success.length,
+    });
+    if (files.length === 0) {
+      // Nothing to show — skip the dispatch so empty turns don't pile up.
+      return;
+    }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.makeUnsafe(`server:terminal-turn-diff:${crypto.randomUUID()}`),
+      threadId: ThreadId.makeUnsafe(input.threadId),
+      turnId: pending.turnId,
+      completedAt: input.completedAt,
+      checkpointRef: targetCheckpointRef,
+      status: "ready",
+      files,
+      assistantMessageId: undefined,
+      checkpointTurnCount: pending.turnCount,
+      createdAt: input.completedAt,
+    });
+  });
+
+  const handleTerminalActivityForCheckpoint = (event: {
+    readonly threadId: string;
+    readonly terminalId: string;
+    readonly cliKind: TerminalCliKind | null;
+    readonly hasRunningSubprocess: boolean;
+    readonly createdAt: string;
+  }) => {
+    if (event.cliKind !== "claude") {
+      return;
+    }
+    const runningSet = claudeRunningTerminalsByThreadId.get(event.threadId) ?? new Set<string>();
+    const wasEmpty = runningSet.size === 0;
+    if (event.hasRunningSubprocess) {
+      runningSet.add(event.terminalId);
+    } else {
+      runningSet.delete(event.terminalId);
+    }
+    if (runningSet.size === 0) {
+      claudeRunningTerminalsByThreadId.delete(event.threadId);
+    } else {
+      claudeRunningTerminalsByThreadId.set(event.threadId, runningSet);
+    }
+    if (wasEmpty && runningSet.size > 0) {
+      void runPromise(
+        beginTerminalTurn({ threadId: event.threadId, startedAt: event.createdAt }).pipe(
+          Effect.catchCause(() => Effect.void),
+        ),
+      );
+    } else if (!wasEmpty && runningSet.size === 0) {
+      void runPromise(
+        completeTerminalTurn({ threadId: event.threadId, completedAt: event.createdAt }).pipe(
+          Effect.catchCause(() => Effect.void),
+        ),
+      );
+    }
+  };
+
   const unsubscribeTerminalEvents = yield* terminalManager.subscribe(
     (event) => void Effect.runPromise(pushBus.publishAll(WS_CHANNELS.terminalEvent, event)),
   );
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
+  const unsubscribeClaudeSessionEvents = yield* terminalManager.subscribe((event) => {
+    if (event.type === "claude-session") {
+      if (event.cwd) {
+        claudeReportedCwdByThreadId.set(event.threadId, event.cwd);
+      }
+      void runPromise(
+        applyClaudeSessionMeta({
+          threadId: event.threadId,
+          sessionId: event.sessionId,
+          summary: event.summary,
+        }).pipe(Effect.catchCause(() => Effect.void)),
+      );
+      return;
+    }
+    if (event.type === "activity") {
+      handleTerminalActivityForCheckpoint({
+        threadId: event.threadId,
+        terminalId: event.terminalId,
+        cliKind: event.cliKind,
+        hasRunningSubprocess: event.hasRunningSubprocess,
+        createdAt: event.createdAt,
+      });
+    }
+  });
+  yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeClaudeSessionEvents()));
   yield* readiness.markTerminalSubscriptionsReady;
 
   yield* Effect.addFinalizer(() =>
@@ -2062,7 +2406,63 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.terminalOpen: {
         const body = stripRequestTag(request.body);
         terminalTitleTracker.reset(body.threadId, body.terminalId ?? DEFAULT_TERMINAL_ID);
-        return yield* terminalManager.open(body);
+        const snapshot = yield* terminalManager.open(body);
+        yield* Effect.gen(function* () {
+          const readModel = yield* orchestrationEngine.getReadModel();
+          const thread = readModel.threads.find((t) => t.id === body.threadId);
+          if (!thread || thread.interactionMode !== "terminal-cli") {
+            return;
+          }
+          const cliKind = thread.cliKind;
+          const cliSessionId = thread.cliSessionId;
+          if (!cliKind) {
+            return;
+          }
+          const threadRow = yield* projectionThreadRepository.getById({
+            threadId: ThreadId.makeUnsafe(body.threadId),
+          });
+          if (Option.isNone(threadRow)) {
+            return;
+          }
+          const row = threadRow.value;
+          const launched = row.cliLaunchedOnce;
+          // If the PTY already has the matching CLI live (managed-agent mid-turn
+          // or a detected subprocess matching this thread's CLI), don't auto-type
+          // a resume command — it would land in Claude's prompt as user input.
+          const terminalId = body.terminalId ?? DEFAULT_TERMINAL_ID;
+          const activity = yield* terminalManager.getSessionActivity(body.threadId, terminalId);
+          if (
+            activity &&
+            (activity.managedAgentRunning ||
+              (activity.hasRunningSubprocess && activity.detectedCliKind === cliKind))
+          ) {
+            if (!launched) {
+              yield* projectionThreadRepository.markCliLaunchedOnce({
+                threadId: ThreadId.makeUnsafe(body.threadId),
+              });
+            }
+            return;
+          }
+          let initialCommand: string;
+          if (cliKind === "claude") {
+            initialCommand = launched
+              ? `claude --resume ${cliSessionId}`
+              : `claude --session-id ${cliSessionId}`;
+          } else {
+            initialCommand = launched ? "codex resume --last" : "codex";
+          }
+          yield* terminalManager.write({
+            threadId: body.threadId,
+            terminalId,
+            data: `${initialCommand}\r`,
+          });
+          if (!launched) {
+            yield* projectionThreadRepository.markCliLaunchedOnce({
+              threadId: ThreadId.makeUnsafe(body.threadId),
+            });
+          }
+        }).pipe(Effect.catch(() => Effect.void));
+        return snapshot;
       }
 
       case WS_METHODS.terminalWrite: {
@@ -2228,9 +2628,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
     const result = yield* Effect.exit(routeRequest(ws, request.success));
     if (Exit.isFailure(result)) {
+      const errors = Cause.prettyErrors(result.cause);
+      const failureMessage =
+        errors.length > 0
+          ? errors.map((err) => err.message).join("\n")
+          : Cause.pretty(result.cause);
       return yield* sendWsResponse({
         id: request.success.id,
-        error: { message: Cause.pretty(result.cause) },
+        error: { message: failureMessage },
       });
     }
 

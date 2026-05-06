@@ -342,24 +342,32 @@ export function buildThreadAttentionCopy(candidate: ThreadAttentionCandidate): {
   };
 }
 
-export function buildTerminalCompletionCopy(candidate: CompletedTerminalCandidate): {
+export function buildTerminalCompletionCopy(
+  candidate: CompletedTerminalCandidate,
+  threadTitle?: string | null,
+): {
   title: string;
   body: string;
 } {
   const terminalLabel = candidate.title.trim() || "Terminal";
+  const normalizedThreadTitle = threadTitle?.trim() ?? "";
   return {
-    title: "Terminal task completed",
+    title: normalizedThreadTitle.length > 0 ? normalizedThreadTitle : "Terminal task completed",
     body: `${terminalLabel} finished working.`,
   };
 }
 
-export function buildTerminalAttentionCopy(candidate: TerminalAttentionCandidate): {
+export function buildTerminalAttentionCopy(
+  candidate: TerminalAttentionCandidate,
+  threadTitle?: string | null,
+): {
   title: string;
   body: string;
 } {
   const terminalLabel = candidate.title.trim() || "Terminal";
+  const normalizedThreadTitle = threadTitle?.trim() ?? "";
   return {
-    title: "Terminal input needed",
+    title: normalizedThreadTitle.length > 0 ? normalizedThreadTitle : "Terminal input needed",
     body: `${terminalLabel} needs your attention.`,
   };
 }

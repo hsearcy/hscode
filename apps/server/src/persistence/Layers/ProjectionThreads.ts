@@ -24,6 +24,7 @@ const SqliteBoolean = Schema.Number.pipe(
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     createBranchFlowCompleted: SqliteBoolean,
+    cliLaunchedOnce: SqliteBoolean,
     handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
     lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
     modelSelection: Schema.fromJsonString(ModelSelection),
@@ -67,7 +68,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at,
           updated_at,
           archived_at,
-          deleted_at
+          deleted_at,
+          cli_kind,
+          cli_session_id,
+          cli_launched_once
         )
         VALUES (
           ${row.threadId},
@@ -98,7 +102,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.createdAt},
           ${row.updatedAt},
           ${row.archivedAt ?? null},
-          ${row.deletedAt}
+          ${row.deletedAt},
+          ${row.cliKind ?? null},
+          ${row.cliSessionId ?? null},
+          ${row.cliLaunchedOnce ? 1 : 0}
         )
         ON CONFLICT (thread_id)
         DO UPDATE SET
@@ -129,7 +136,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
           archived_at = excluded.archived_at,
-          deleted_at = excluded.deleted_at
+          deleted_at = excluded.deleted_at,
+          cli_kind = excluded.cli_kind,
+          cli_session_id = excluded.cli_session_id,
+          cli_launched_once = excluded.cli_launched_once
       `,
   });
 
@@ -167,7 +177,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          cli_kind AS "cliKind",
+          cli_session_id AS "cliSessionId",
+          cli_launched_once AS "cliLaunchedOnce"
         FROM projection_threads
         WHERE thread_id = ${threadId}
       `,
@@ -207,7 +220,10 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
-          deleted_at AS "deletedAt"
+          deleted_at AS "deletedAt",
+          cli_kind AS "cliKind",
+          cli_session_id AS "cliSessionId",
+          cli_launched_once AS "cliLaunchedOnce"
         FROM projection_threads
         WHERE project_id = ${projectId}
         ORDER BY created_at ASC, thread_id ASC
@@ -243,11 +259,27 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
     );
 
+  const markCliLaunchedOnce: ProjectionThreadRepositoryShape["markCliLaunchedOnce"] = ({
+    threadId,
+  }) =>
+    Effect.gen(function* () {
+      yield* sql`
+        UPDATE projection_threads
+        SET cli_launched_once = 1
+        WHERE thread_id = ${threadId}
+      `;
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadRepository.markCliLaunchedOnce:query"),
+      ),
+    );
+
   return {
     upsert,
     getById,
     listByProjectId,
     deleteById,
+    markCliLaunchedOnce,
   } satisfies ProjectionThreadRepositoryShape;
 });
 

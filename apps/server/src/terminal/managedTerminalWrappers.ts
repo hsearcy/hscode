@@ -9,6 +9,7 @@ import {
   defaultTerminalTitleForCliKind,
   managedTerminalCommandNameForCliKind,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
+  T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_KIND_ENV_KEY,
   type TerminalAgentHookEventType,
   type TerminalCliKind,
@@ -124,12 +125,71 @@ _t3code_emit_osc() {
   printf '%b' "$_t3code_sequence"
 }
 
+_t3code_emit_claude_meta() {
+  _t3code_session_id="$(_t3code_extract_event session_id)"
+  if [ -z "$_t3code_session_id" ]; then
+    return
+  fi
+  _t3code_transcript_path="$(_t3code_extract_event transcript_path)"
+  _t3code_summary=""
+  if [ -n "$_t3code_transcript_path" ] && [ -r "$_t3code_transcript_path" ]; then
+    # Claude records titles as either {"type":"custom-title","customTitle":"..."}
+    # (set via /rename) or {"type":"ai-title","aiTitle":"..."} (auto-generated).
+    # User-set custom titles win; otherwise fall back to the most recent ai-title.
+    _t3code_summary="$(grep '"type":"custom-title"' "$_t3code_transcript_path" 2>/dev/null \\
+      | tail -n 1 \\
+      | sed -n 's/.*"customTitle"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
+    if [ -z "$_t3code_summary" ]; then
+      _t3code_summary="$(grep '"type":"ai-title"' "$_t3code_transcript_path" 2>/dev/null \\
+        | tail -n 1 \\
+        | sed -n 's/.*"aiTitle"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
+    fi
+  fi
+  # Claude's hook "cwd" is its launch dir and never moves (cd inside Bash
+  # subshells doesn't change it), so it can't tell us which worktree the
+  # actual edits are landing in. Instead, scan the transcript for the most
+  # recent absolute "file_path" from an edit-style tool_use (Edit/Write/
+  # MultiEdit/Update) and emit its directory. Git resolves the surrounding
+  # worktree root from any path inside it, so feeding its parent into the
+  # diff queries is enough.
+  _t3code_cwd=""
+  if [ -n "$_t3code_transcript_path" ] && [ -r "$_t3code_transcript_path" ]; then
+    _t3code_recent_file="$(grep -oE '"file_path"[[:space:]]*:[[:space:]]*"/[^"]*"' \\
+      "$_t3code_transcript_path" 2>/dev/null \\
+      | tail -n 1 \\
+      | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
+    if [ -n "$_t3code_recent_file" ]; then
+      _t3code_cwd="$(dirname "$_t3code_recent_file")"
+    fi
+  fi
+  if [ -z "$_t3code_cwd" ]; then
+    _t3code_cwd="$(_t3code_extract_event cwd)"
+  fi
+  if command -v base64 >/dev/null 2>&1; then
+    _t3code_payload="$(printf '{"sessionId":"%s","summary":"%s","cwd":"%s"}' \\
+      "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd" | base64 | tr -d '\\n')"
+    _t3code_emit_osc "\\033]${T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX}\${_t3code_payload}\\007"
+  fi
+}
+
 case "$_t3code_event" in
-  UserPromptSubmit|PostToolUse|PostToolUseFailure|Start)
+  UserPromptSubmit)
+    _t3code_emit_osc '${buildHookOscSequence("Start")}'
+    # /rename and other in-session updates land in the transcript without firing
+    # a Stop hook. Re-read on every user prompt so the next message after a rename
+    # flushes the fresh summary up to the sidebar.
+    _t3code_emit_claude_meta
+    ;;
+  PostToolUse|PostToolUseFailure|Start)
     _t3code_emit_osc '${buildHookOscSequence("Start")}'
     ;;
   Stop)
     _t3code_emit_osc '${buildHookOscSequence("Stop")}'
+    _t3code_emit_claude_meta
+    ;;
+  SessionStart)
+    _t3code_emit_osc '${buildHookOscSequence("Start")}'
+    _t3code_emit_claude_meta
     ;;
   PermissionRequest|PreToolUse|Notification)
     _t3code_emit_osc '${buildHookOscSequence("PermissionRequest")}'
@@ -143,6 +203,7 @@ function buildClaudeSettingsJson(notifyHookPath: string): string {
   return JSON.stringify(
     {
       hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command }] }],
         UserPromptSubmit: [{ hooks: [{ type: "command", command }] }],
         Stop: [{ hooks: [{ type: "command", command }] }],
         PostToolUse: [{ matcher: "*", hooks: [{ type: "command", command }] }],

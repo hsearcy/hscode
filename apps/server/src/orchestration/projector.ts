@@ -313,6 +313,8 @@ export function projectEvent(
             archivedAt: null,
             deletedAt: null,
             handoff: payload.handoff,
+            ...(payload.cliKind !== undefined ? { cliKind: payload.cliKind } : {}),
+            ...(payload.cliSessionId !== undefined ? { cliSessionId: payload.cliSessionId } : {}),
             messages: [],
             activities: [],
             checkpoints: [],
@@ -416,6 +418,7 @@ export function projectEvent(
               ...(payload.subagentRole !== undefined ? { subagentRole: payload.subagentRole } : {}),
               ...(payload.lastKnownPr !== undefined ? { lastKnownPr: payload.lastKnownPr } : {}),
               ...(payload.handoff !== undefined ? { handoff: payload.handoff } : {}),
+              ...(payload.cliSessionId !== undefined ? { cliSessionId: payload.cliSessionId } : {}),
               updatedAt: payload.updatedAt,
             }),
           };
