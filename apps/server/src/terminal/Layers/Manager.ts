@@ -985,13 +985,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (!existing) {
         await this.flushPersistQueue(input.threadId, input.terminalId);
         const history = await this.readHistory(input.threadId, input.terminalId);
+        const persistedCwd = await this.readPersistedCwd(input.threadId, input.terminalId);
+        const spawnCwd = persistedCwd ?? input.cwd;
         const cols = input.cols ?? DEFAULT_OPEN_COLS;
         const rows = input.rows ?? DEFAULT_OPEN_ROWS;
         const historyMetrics = measureHistory(history);
         const session: TerminalSessionState = {
           threadId: input.threadId,
           terminalId: input.terminalId,
-          cwd: input.cwd,
+          cwd: spawnCwd,
+          requestedCwd: input.cwd,
           status: "starting",
           pid: null,
           history,
@@ -1023,7 +1026,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         };
         this.sessions.set(sessionKey, session);
         this.evictInactiveSessionsIfNeeded();
-        await this.startSession(session, { ...input, cols, rows }, "started");
+        await this.startSession(session, { ...input, cwd: spawnCwd, cols, rows }, "started");
         return this.snapshot(session);
       }
 
@@ -1034,12 +1037,14 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       const runtimeEnvChanged =
         JSON.stringify(currentRuntimeEnv) !== JSON.stringify(nextRuntimeEnv);
 
-      if (existing.cwd !== input.cwd || runtimeEnvChanged) {
+      if (existing.requestedCwd !== input.cwd || runtimeEnvChanged) {
         this.stopProcess(existing);
         existing.cwd = input.cwd;
+        existing.requestedCwd = input.cwd;
         existing.runtimeEnv = nextRuntimeEnv;
         resetSessionHistory(existing);
         await this.persistHistory(existing.threadId, existing.terminalId, existing.history);
+        await this.clearPersistedCwd(existing.threadId, existing.terminalId);
       } else if (existing.status === "exited" || existing.status === "error") {
         existing.runtimeEnv = nextRuntimeEnv;
         resetSessionHistory(existing);
@@ -1138,6 +1143,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           threadId: input.threadId,
           terminalId: input.terminalId,
           cwd: input.cwd,
+          requestedCwd: input.cwd,
           status: "starting",
           pid: null,
           history: "",
@@ -1172,8 +1178,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       } else {
         this.stopProcess(session);
         session.cwd = input.cwd;
+        session.requestedCwd = input.cwd;
         session.runtimeEnv = normalizedRuntimeEnv(input.env);
       }
+      await this.clearPersistedCwd(input.threadId, input.terminalId);
 
       if (!session) {
         throw new Error(
@@ -1784,7 +1792,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   }
 
   private async deleteHistory(threadId: string, terminalId: string): Promise<void> {
-    const deletions = [fs.promises.rm(this.historyPath(threadId, terminalId), { force: true })];
+    const deletions = [
+      fs.promises.rm(this.historyPath(threadId, terminalId), { force: true }),
+      fs.promises.rm(this.cwdSidecarPath(threadId, terminalId), { force: true }),
+    ];
     if (terminalId === DEFAULT_TERMINAL_ID) {
       deletions.push(fs.promises.rm(this.legacyHistoryPath(threadId), { force: true }));
     }
@@ -1894,6 +1905,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           if (!liveSession || liveSession.status !== "running" || liveSession.pid !== terminalPid) {
             return;
           }
+
+          const liveCwd = await this.readLiveProcessCwd(terminalPid);
+          if (liveCwd && liveCwd !== liveSession.cwd) {
+            liveSession.cwd = liveCwd;
+            void this.persistCwdSidecar(liveSession.threadId, liveSession.terminalId, liveCwd);
+          }
+
           if (
             liveSession.hasRunningSubprocess === hasRunningSubprocess &&
             liveSession.detectedCliKind === terminalCliKind
@@ -1959,6 +1977,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         .filter(
           (name) =>
             name === `${toSafeThreadId(threadId)}.log` ||
+            name === `${toSafeThreadId(threadId)}.log.cwd` ||
             name === `${legacySafeThreadId(threadId)}.log` ||
             name.startsWith(threadPrefix),
         )
@@ -2016,6 +2035,75 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       return path.join(this.logsDir, `${threadPart}.log`);
     }
     return path.join(this.logsDir, `${threadPart}_${toSafeTerminalId(terminalId)}.log`);
+  }
+
+  private cwdSidecarPath(threadId: string, terminalId: string): string {
+    return `${this.historyPath(threadId, terminalId)}.cwd`;
+  }
+
+  private async readPersistedCwd(threadId: string, terminalId: string): Promise<string | null> {
+    try {
+      const raw = await fs.promises.readFile(this.cwdSidecarPath(threadId, terminalId), "utf8");
+      const trimmed = raw.trim();
+      if (!trimmed) return null;
+      const stats = await fs.promises.stat(trimmed).catch(() => null);
+      if (!stats || !stats.isDirectory()) return null;
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
+  private async clearPersistedCwd(threadId: string, terminalId: string): Promise<void> {
+    try {
+      await fs.promises.rm(this.cwdSidecarPath(threadId, terminalId), { force: true });
+    } catch {
+      // best effort
+    }
+  }
+
+  private async persistCwdSidecar(
+    threadId: string,
+    terminalId: string,
+    cwd: string,
+  ): Promise<void> {
+    try {
+      await fs.promises.writeFile(this.cwdSidecarPath(threadId, terminalId), cwd, "utf8");
+    } catch (error) {
+      this.logger.warn("failed to persist terminal cwd sidecar", {
+        threadId,
+        terminalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async readLiveProcessCwd(pid: number): Promise<string | null> {
+    if (process.platform === "linux") {
+      try {
+        return await fs.promises.readlink(`/proc/${pid}/cwd`);
+      } catch {
+        return null;
+      }
+    }
+    if (process.platform === "darwin") {
+      try {
+        const result = await runProcess("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+          allowNonZeroExit: true,
+        });
+        if (result.code !== 0) return null;
+        for (const line of result.stdout.split("\n")) {
+          if (line.startsWith("n")) {
+            const candidate = line.slice(1).trim();
+            if (candidate.length > 0) return candidate;
+          }
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   private legacyHistoryPath(threadId: string): string {

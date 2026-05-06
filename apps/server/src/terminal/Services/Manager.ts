@@ -44,6 +44,13 @@ export interface TerminalSessionState {
   threadId: string;
   terminalId: string;
   cwd: string;
+  /**
+   * The cwd most recently requested by the client (typically the workspace root).
+   * Used to detect when the client has switched workspaces and the shell needs to
+   * be respawned, independent of session.cwd which we may seed from a persisted
+   * post-cd directory so the user lands back where they last were.
+   */
+  requestedCwd: string;
   status: TerminalSessionStatus;
   pid: number | null;
   history: string;
