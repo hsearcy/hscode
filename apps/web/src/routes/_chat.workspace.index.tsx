@@ -5,7 +5,16 @@ import { useWorkspaceStore } from "~/workspaceStore";
 
 function WorkspaceIndexRouteView() {
   const navigate = useNavigate();
-  const workspaceId = useWorkspaceStore((state) => state.workspacePages[0]?.id ?? null);
+  const workspaceId = useWorkspaceStore((state) => {
+    const lastVisited = state.lastVisitedWorkspaceId;
+    if (
+      lastVisited !== null &&
+      state.workspacePages.some((workspace) => workspace.id === lastVisited)
+    ) {
+      return lastVisited;
+    }
+    return state.workspacePages[0]?.id ?? null;
+  });
   const redirectedRef = useRef(false);
 
   useEffect(() => {

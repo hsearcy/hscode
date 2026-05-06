@@ -1135,6 +1135,7 @@ export default function Sidebar() {
   const deleteWorkspace = useWorkspaceStore((store) => store.deleteWorkspace);
   const reorderWorkspace = useWorkspaceStore((store) => store.reorderWorkspace);
   const homeDir = useWorkspaceStore((store) => store.homeDir);
+  const lastVisitedWorkspaceId = useWorkspaceStore((store) => store.lastVisitedWorkspaceId);
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
   const isOnSettings = useLocation({ select: (loc) => loc.pathname === "/settings" });
@@ -1741,7 +1742,12 @@ export default function Sidebar() {
   const handleSidebarViewChange = useCallback(
     (view: "threads" | "workspace") => {
       if (view === "workspace") {
-        const fallbackWorkspaceId = workspacePages[0]?.id;
+        const restoredWorkspaceId =
+          lastVisitedWorkspaceId &&
+          workspacePages.some((workspace) => workspace.id === lastVisitedWorkspaceId)
+            ? lastVisitedWorkspaceId
+            : null;
+        const fallbackWorkspaceId = restoredWorkspaceId ?? workspacePages[0]?.id;
         if (!fallbackWorkspaceId) {
           return;
         }
@@ -1769,6 +1775,7 @@ export default function Sidebar() {
     [
       handleNewChat,
       lastThreadRoute,
+      lastVisitedWorkspaceId,
       navigate,
       navigateToWorkspace,
       routeWorkspaceId,

@@ -22,6 +22,7 @@ interface WorkspacePage {
 interface WorkspaceStoreState {
   homeDir: string | null;
   workspacePages: WorkspacePage[];
+  lastVisitedWorkspaceId: string | null;
   setHomeDir: (homeDir: string | null | undefined) => void;
   ensureWorkspacePage: (workspaceId: string) => void;
   createWorkspace: () => string;
@@ -29,6 +30,7 @@ interface WorkspaceStoreState {
   setWorkspaceLayoutPreset: (workspaceId: string, layoutPresetId: WorkspaceLayoutPresetId) => void;
   deleteWorkspace: (workspaceId: string) => void;
   reorderWorkspace: (workspaceId: string, nextIndex: number) => void;
+  setLastVisitedWorkspaceId: (workspaceId: string) => void;
 }
 
 const WORKSPACE_STORE_STORAGE_KEY = "dpcode:workspace-pages:v2";
@@ -135,6 +137,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
     (set) => ({
       homeDir: null,
       workspacePages: [createWorkspacePage([])],
+      lastVisitedWorkspaceId: null,
       setHomeDir: (homeDir) =>
         set((state) => {
           // `undefined` means server config has not arrived yet; keep the last known value.
@@ -215,12 +218,21 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
           const remainingWorkspacePages = state.workspacePages.filter(
             (workspace) => workspace.id !== workspaceId,
           );
-          return {
-            workspacePages:
-              remainingWorkspacePages.length > 0
-                ? remainingWorkspacePages
-                : [createWorkspacePage([])],
-          };
+          const workspacePages =
+            remainingWorkspacePages.length > 0
+              ? remainingWorkspacePages
+              : [createWorkspacePage([])];
+          const lastVisitedWorkspaceId =
+            state.lastVisitedWorkspaceId === workspaceId ? null : state.lastVisitedWorkspaceId;
+          return { workspacePages, lastVisitedWorkspaceId };
+        }),
+      setLastVisitedWorkspaceId: (workspaceId) =>
+        set((state) => {
+          const normalized = workspaceId.trim();
+          if (normalized.length === 0 || state.lastVisitedWorkspaceId === normalized) {
+            return state;
+          }
+          return { lastVisitedWorkspaceId: normalized };
         }),
       reorderWorkspace: (workspaceId, nextIndex) =>
         set((state) => {
@@ -242,14 +254,22 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
       partialize: (state) => ({
         homeDir: state.homeDir,
         workspacePages: state.workspacePages,
+        lastVisitedWorkspaceId: state.lastVisitedWorkspaceId,
       }),
       merge: (persistedState, currentState) => {
         const candidate = (persistedState as Partial<WorkspaceStoreState> | undefined) ?? {};
         const workspacePages = normalizeWorkspacePages(candidate.workspacePages ?? []);
+        const persistedLastVisited = candidate.lastVisitedWorkspaceId?.trim() ?? null;
+        const lastVisitedWorkspaceId =
+          persistedLastVisited !== null &&
+          workspacePages.some((workspace) => workspace.id === persistedLastVisited)
+            ? persistedLastVisited
+            : null;
         return {
           ...currentState,
           homeDir: candidate.homeDir?.trim() ?? null,
           workspacePages,
+          lastVisitedWorkspaceId,
         };
       },
     },
