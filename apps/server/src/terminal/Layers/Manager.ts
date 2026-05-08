@@ -67,6 +67,138 @@ const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECT
 const MANAGED_TERMINAL_WRAPPER_DIRNAME = "_managed-bin";
 const MANAGED_TERMINAL_ZSH_DIRNAME = "_managed-zsh";
 
+// Bump PTY children above Chromium renderer's oom_score_adj (300) so the
+// kernel sacrifices runaway CLIs (claude/ruby/etc.) instead of the dpcode UI
+// when the system runs out of memory. Linux inherits this to forked children,
+// so setting it once on the shell covers everything spawned inside the terminal.
+const PTY_OOM_SCORE_ADJ = 700;
+
+function raisePtyOomScoreAdj(pid: number | undefined): void {
+  if (process.platform !== "linux" || !pid) {
+    return;
+  }
+  try {
+    fs.writeFileSync(`/proc/${pid}/oom_score_adj`, String(PTY_OOM_SCORE_ADJ));
+  } catch {
+    // Best-effort: /proc may be unavailable, pid may have already exited,
+    // or kernel may reject the write. Not worth surfacing.
+  }
+}
+
+// Persisted tracker of live PTY shell pids. Lets us kill orphans on next
+// startup if the server died abnormally (SIGKILL, OOM, crash) and Effect
+// finalizers never ran. Without this, zsh shells reparent to systemd and
+// keep their CLI children (claude, ruby, ...) alive indefinitely, holding
+// hundreds of MB each.
+const PTY_PID_TRACKER_FILENAME = ".pty-pids";
+
+function readTrackedPtyPids(trackerPath: string): number[] {
+  try {
+    const raw = fs.readFileSync(trackerPath, "utf8");
+    const pids: number[] = [];
+    for (const line of raw.split("\n")) {
+      const n = Number.parseInt(line.trim(), 10);
+      if (Number.isInteger(n) && n > 0) {
+        pids.push(n);
+      }
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
+function writeTrackedPtyPids(trackerPath: string, pids: ReadonlySet<number>): void {
+  try {
+    fs.writeFileSync(trackerPath, [...pids].join("\n") + (pids.size > 0 ? "\n" : ""));
+  } catch {
+    // Best-effort: tracker is a recovery aid, not load-bearing.
+  }
+}
+
+function readProcPpid(pid: number): number | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    // /proc/<pid>/stat fields are space-separated, but field 2 (comm) is
+    // wrapped in parens and may contain spaces. Split on the trailing ')'.
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen < 0) {
+      return null;
+    }
+    const fields = stat
+      .slice(closeParen + 1)
+      .trim()
+      .split(/\s+/);
+    // After comm: state(0), ppid(1), pgrp(2), ...
+    const ppid = Number.parseInt(fields[1] ?? "", 10);
+    return Number.isInteger(ppid) ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+function killTreeSync(rootPid: number): void {
+  // Walk descendants via /proc and SIGKILL bottom-up. We can't use treeKill
+  // here because cleanup runs synchronously at startup before the runtime
+  // is fully constructed.
+  if (process.platform !== "linux") {
+    return;
+  }
+  const children = new Map<number, number[]>();
+  try {
+    for (const entry of fs.readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const ppid = readProcPpid(Number.parseInt(entry, 10));
+      if (ppid === null) continue;
+      const list = children.get(ppid);
+      if (list) list.push(Number.parseInt(entry, 10));
+      else children.set(ppid, [Number.parseInt(entry, 10)]);
+    }
+  } catch {
+    return;
+  }
+  const all: number[] = [];
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const p = queue.shift();
+    if (p === undefined) break;
+    all.push(p);
+    const kids = children.get(p);
+    if (kids) queue.push(...kids);
+  }
+  // Kill children before the parent so reparenting doesn't reseat them under init.
+  for (let i = all.length - 1; i >= 0; i--) {
+    const pid = all[i];
+    if (pid === undefined) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone, no permission, etc.
+    }
+  }
+}
+
+function cleanupOrphanPtyPids(trackerPath: string): { killed: number; checked: number } {
+  if (process.platform !== "linux") {
+    writeTrackedPtyPids(trackerPath, new Set());
+    return { killed: 0, checked: 0 };
+  }
+  const pids = readTrackedPtyPids(trackerPath);
+  let killed = 0;
+  for (const pid of pids) {
+    const ppid = readProcPpid(pid);
+    // Orphan = process still alive AND reparented to init (ppid=1).
+    if (ppid === 1) {
+      killTreeSync(pid);
+      killed++;
+    }
+  }
+  // Reset tracker — anything still alive will be re-recorded as new sessions
+  // open, and anything orphaned has now been killed.
+  writeTrackedPtyPids(trackerPath, new Set());
+  return { killed, checked: pids.length };
+}
+
 const decodeTerminalOpenInput = Schema.decodeUnknownSync(TerminalOpenInput);
 const decodeTerminalRestartInput = Schema.decodeUnknownSync(TerminalRestartInput);
 const decodeTerminalWriteInput = Schema.decodeUnknownSync(TerminalWriteInput);
@@ -932,6 +1064,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private subprocessPollInFlight = false;
   private readonly killEscalationTimers = new Map<PtyProcess, KillEscalationHandle>();
   private readonly logger = createLogger("terminal");
+  private readonly ptyPidTrackerPath: string;
+  private readonly trackedPtyPids = new Set<number>();
 
   constructor(options: TerminalManagerOptions) {
     super();
@@ -953,6 +1087,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.maxRetainedInactiveSessions =
       options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
     fs.mkdirSync(this.logsDir, { recursive: true });
+    this.ptyPidTrackerPath = path.join(this.logsDir, PTY_PID_TRACKER_FILENAME);
+    const orphanReport = cleanupOrphanPtyPids(this.ptyPidTrackerPath);
+    if (orphanReport.killed > 0) {
+      this.logger.warn("killed orphan PTY shells from previous server run", orphanReport);
+    }
     if (this.managedWrapperBinDir) {
       try {
         const preparedWrappers = prepareManagedTerminalAgentWrappers({
@@ -1357,6 +1496,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
       session.process = ptyProcess;
       session.pid = ptyProcess.pid;
+      raisePtyOomScoreAdj(ptyProcess.pid);
+      if (typeof ptyProcess.pid === "number" && ptyProcess.pid > 0) {
+        this.trackedPtyPids.add(ptyProcess.pid);
+        writeTrackedPtyPids(this.ptyPidTrackerPath, this.trackedPtyPids);
+      }
       session.status = "running";
       session.updatedAt = new Date().toISOString();
       session.unsubscribeData = ptyProcess.onData((data) => {
@@ -1513,6 +1657,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.flushOutputBuffer(session);
     this.clearKillEscalationTimer(session.process);
     this.cleanupProcessHandles(session);
+    if (typeof session.pid === "number" && this.trackedPtyPids.delete(session.pid)) {
+      writeTrackedPtyPids(this.ptyPidTrackerPath, this.trackedPtyPids);
+    }
     session.process = null;
     session.pid = null;
     session.hasRunningSubprocess = false;
