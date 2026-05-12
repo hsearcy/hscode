@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xterm/headless": "^5.5.0",
     "ws": "^8.18.0",
     "zod": "^3.25.76"
   },

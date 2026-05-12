@@ -10,7 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { lastLines, stripAnsi } from "./ansi.ts";
+import { lastLines, renderTerminal } from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
@@ -131,7 +131,7 @@ function registerTools(server: McpServer): void {
       threadId: row.threadId,
       cwd: row.worktreePath ?? row.workspaceRoot,
     });
-    const text = stripAnsi(snap.history);
+    const text = await renderTerminal(snap.history);
     const tail = lastLines(text, args.lines ?? 60);
     const activity = ws.getActivity(row.threadId);
     return {
@@ -246,7 +246,7 @@ function registerTools(server: McpServer): void {
       threadId: row.threadId,
       cwd: row.worktreePath ?? row.workspaceRoot,
     });
-    const text = stripAnsi(snap.history);
+    const text = await renderTerminal(snap.history);
     return {
       content: [
         {

@@ -1,32 +1,40 @@
-// Renders a raw PTY byte stream / scrollback into plain text suitable for an LLM.
-// Strips ANSI CSI/OSC sequences, drops cursor/scroll control codes, normalizes
-// carriage returns. This is intentionally simple — for fancier needs swap in
-// @xterm/headless and read its buffer.
+// Renders a raw PTY byte stream into plain text by feeding it through a
+// headless xterm.js terminal — the same library the dpcode web UI uses,
+// so the rendered output matches what a human sees in the Threads view.
 
-const CSI = /\x1b\[[\d;?]*[ -/]*[@-~]/g;
-const OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
-const SS = /\x1b[NOPVWXYZ\\^_]/g;
-const C1 = /\x1b[\(\)\*\+][\x20-\x7e]/g; // charset designators
-const OTHER_ESC = /\x1b[<=>78cDEHMZ]/g;
-const BACKSPACE = /[^\b]\b/g;
+import { Terminal } from "@xterm/headless";
 
-export function stripAnsi(input: string): string {
-  let out = input
-    .replace(OSC, "")
-    .replace(CSI, "")
-    .replace(SS, "")
-    .replace(C1, "")
-    .replace(OTHER_ESC, "")
-    .replace(/\r\n?/g, "\n");
+export interface RenderOptions {
+  cols?: number;
+  rows?: number;
+  scrollback?: number;
+}
 
-  // collapse simple backspace edits (e.g. spinner frames)
-  let prev: string;
-  do {
-    prev = out;
-    out = out.replace(BACKSPACE, "");
-  } while (out !== prev);
-
-  return out;
+export async function renderTerminal(
+  input: string,
+  opts: RenderOptions = {},
+): Promise<string> {
+  const cols = opts.cols ?? 120;
+  const rows = opts.rows ?? 40;
+  const scrollback = opts.scrollback ?? 20000;
+  const term = new Terminal({
+    cols,
+    rows,
+    scrollback,
+    allowProposedApi: true,
+  });
+  // write() is async — xterm parses on a microtask/idle queue. Awaiting
+  // the callback is required, otherwise the buffer is empty when we read.
+  await new Promise<void>((resolve) => term.write(input, () => resolve()));
+  const buf = term.buffer.active;
+  const lines: string[] = [];
+  for (let i = 0; i < buf.length; i++) {
+    const line = buf.getLine(i);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  term.dispose();
+  return lines.join("\n");
 }
 
 export function lastLines(text: string, n: number): string {
