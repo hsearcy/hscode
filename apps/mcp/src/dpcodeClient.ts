@@ -1,23 +1,70 @@
 import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import WebSocket from "ws";
 
 export interface DpcodeConfig {
-  wsUrl: string;
+  wsUrl: string | undefined;
   authToken: string | undefined;
   homeDir: string;
 }
 
 export function loadConfig(): DpcodeConfig {
   const home = process.env.DPCODE_HOME ?? join(homedir(), ".dpcode");
-  // The desktop AppImage listens on 127.0.0.1:32480 by default; the source
-  // server defaults to whatever --host/--port were passed. Let the user
-  // override but pick the AppImage default as the most-common case.
-  const wsUrl = process.env.DPCODE_MCP_URL ?? "ws://127.0.0.1:32480";
+  // When DPCODE_MCP_URL is set, honor it verbatim. Otherwise leave undefined
+  // and let DpcodeWs.connect() rediscover the running desktop backend on every
+  // attempt — the AppImage picks an ephemeral port and rotates the auth token
+  // on each launch, so static config breaks after a restart.
+  const wsUrl = process.env.DPCODE_MCP_URL || undefined;
   const authToken = process.env.DPCODE_AUTH_TOKEN || undefined;
   return { wsUrl, authToken, homeDir: home };
+}
+
+// Walks /proc looking for the dpcode desktop backend (electron's child server
+// process). Extracts the port + auth token from its environ — they were set
+// by the Electron parent and are the only authoritative source.
+export function discoverDesktopDpcode(): {
+  wsUrl: string;
+  authToken: string | undefined;
+} | null {
+  let pids: string[];
+  try {
+    pids = readdirSync("/proc").filter((n) => /^\d+$/.test(n));
+  } catch {
+    return null;
+  }
+  for (const pid of pids) {
+    let cmdline: string;
+    try {
+      cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      continue;
+    }
+    // The bundled backend is launched as `dpcode <path>/app.asar/apps/server/dist/index.mjs`.
+    if (!cmdline.includes("app.asar/apps/server/dist/index.mjs")) continue;
+    let environRaw: string;
+    try {
+      environRaw = readFileSync(`/proc/${pid}/environ`, "utf8");
+    } catch {
+      continue;
+    }
+    const env = new Map<string, string>();
+    for (const kv of environRaw.split("\0")) {
+      const idx = kv.indexOf("=");
+      if (idx > 0) env.set(kv.slice(0, idx), kv.slice(idx + 1));
+    }
+    const port = env.get("DPCODE_PORT") ?? env.get("T3CODE_PORT");
+    if (!port) continue;
+    const token =
+      env.get("DPCODE_AUTH_TOKEN") ||
+      env.get("T3CODE_AUTH_TOKEN") ||
+      undefined;
+    const host = env.get("DPCODE_HOST") ?? env.get("T3CODE_HOST") ?? "127.0.0.1";
+    return { wsUrl: `ws://${host}:${port}`, authToken: token };
+  }
+  return null;
 }
 
 export interface ThreadRow {
@@ -183,8 +230,29 @@ export class DpcodeWs {
   async connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
     this.connectPromise = new Promise<void>((resolve, reject) => {
-      const url = new URL(this.cfg.wsUrl);
-      if (this.cfg.authToken) url.searchParams.set("token", this.cfg.authToken);
+      // Resolve endpoint freshly on each connect. Manual DPCODE_MCP_URL wins;
+      // otherwise auto-discover from the running desktop backend (port +
+      // token rotate per AppImage launch).
+      let endpoint: { wsUrl: string; authToken: string | undefined };
+      if (this.cfg.wsUrl) {
+        endpoint = { wsUrl: this.cfg.wsUrl, authToken: this.cfg.authToken };
+      } else {
+        const discovered = discoverDesktopDpcode();
+        if (!discovered) {
+          reject(
+            new Error(
+              "No dpcode backend found. Start the desktop app (`dpcode`) or set DPCODE_MCP_URL.",
+            ),
+          );
+          return;
+        }
+        endpoint = {
+          wsUrl: discovered.wsUrl,
+          authToken: this.cfg.authToken ?? discovered.authToken,
+        };
+      }
+      const url = new URL(endpoint.wsUrl);
+      if (endpoint.authToken) url.searchParams.set("token", endpoint.authToken);
       const ws = new WebSocket(url.toString());
       this.ws = ws;
       ws.on("open", () => resolve());
