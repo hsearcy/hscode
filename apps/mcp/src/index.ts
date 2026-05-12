@@ -10,7 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { lastLines, renderTerminal } from "./ansi.ts";
+import { lastMeaningfulLines, renderTerminal } from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
@@ -132,7 +132,7 @@ function registerTools(server: McpServer): void {
       cwd: row.worktreePath ?? row.workspaceRoot,
     });
     const text = await renderTerminal(snap.history);
-    const tail = lastLines(text, args.lines ?? 60);
+    const tail = lastMeaningfulLines(text, args.lines ?? 80);
     const activity = ws.getActivity(row.threadId);
     return {
       content: [
@@ -258,7 +258,7 @@ function registerTools(server: McpServer): void {
               timedOut: !activity || activity.agentState == null
                 ? true
                 : !target.includes(activity.agentState as "attention" | "review"),
-              screen: lastLines(text, 60),
+              screen: lastMeaningfulLines(text, 80),
             },
             null,
             2,

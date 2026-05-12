@@ -42,3 +42,21 @@ export function lastLines(text: string, n: number): string {
   if (lines.length <= n) return text;
   return lines.slice(lines.length - n).join("\n");
 }
+
+// Claude Code's spinner / "thinking" indicator emits lines that, after xterm
+// rendering, contain only decorative glyphs. When a session is mid-turn the
+// last visible viewport is dominated by these frames, pushing real content
+// out of a "last N lines" window. This trims them so callers see the actual
+// conversation tail.
+const SPINNER_LINE = /^[\s✶✻✽✢*·…•⏵⏶⏷↑↓→←]*$/;
+
+export function lastMeaningfulLines(text: string, n: number): string {
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  for (let i = lines.length - 1; i >= 0 && kept.length < n; i--) {
+    const line = lines[i]!;
+    if (SPINNER_LINE.test(line)) continue;
+    kept.push(line);
+  }
+  return kept.reverse().join("\n");
+}
