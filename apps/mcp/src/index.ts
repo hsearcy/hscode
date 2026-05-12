@@ -117,7 +117,13 @@ function registerTools(server: McpServer): void {
   "read_thread",
   {
     description:
-      "Read the rendered terminal scrollback of a dpcode thread. Opens (or reuses) the terminal session, strips ANSI escape codes, and returns the last `lines` lines (default 60). Use this to see what Claude/Codex is currently showing — including pending menus or waiting-for-input prompts.",
+      "Read the rendered terminal scrollback of a dpcode thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
+      "Interpreting the output (Claude Code / Codex TUI):\n" +
+      "- Lines starting with `> ` (chat-bubble blocks in scrollback) are messages the USER actually sent. These are historical.\n" +
+      "- Lines starting with `● ` are messages the ASSISTANT sent (Claude's responses, tool calls).\n" +
+      "- A single line near the bottom that looks like `❯ <text>` bracketed by two horizontal rule lines (`────...`) is the CURRENT INPUT BOX DRAFT — text auto-populated by the CLI (e.g. a suggested next prompt) that has NOT been sent yet. Treat it as a draft, not a message.\n" +
+      "- `✻ Cooked for Ns` / `※ recap: ...` / `⏵⏵ auto mode on ...` are TUI status decorations, not user/assistant content.\n" +
+      "- If the screen looks sparse or all spinner-like, the CLI is mid-turn; either `wait_for_attention` or call `read_thread` again shortly.",
     inputSchema: {
       thread: z
         .string()
