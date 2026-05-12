@@ -1,0 +1,285 @@
+#!/usr/bin/env bun
+// dpcode-mcp: expose dpcode thread terminals as MCP tools.
+//
+// Reads thread metadata directly from ~/.dpcode/userdata/state.sqlite (concurrent
+// readers are safe in WAL mode) and drives terminals via the dpcode WebSocket
+// API (terminal.open / terminal.write + terminal.event push).
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { lastLines, stripAnsi } from "./ansi.ts";
+import {
+  DpcodeDb,
+  DpcodeWs,
+  loadConfig,
+  type TerminalActivity,
+  type ThreadRow,
+} from "./dpcodeClient.ts";
+
+const cfg = loadConfig();
+const db = new DpcodeDb(cfg.homeDir);
+const ws = new DpcodeWs(cfg);
+
+function describeRow(row: ThreadRow, activity?: TerminalActivity | null) {
+  return {
+    threadId: row.threadId,
+    title: row.title,
+    project: row.projectTitle,
+    workspaceRoot: row.workspaceRoot,
+    cliKind: row.cliKind,
+    cliSessionId: row.cliSessionId,
+    branch: row.branch,
+    worktreePath: row.worktreePath,
+    updatedAt: row.updatedAt,
+    latestUserMessageAt: row.latestUserMessageAt,
+    pendingApprovalCount: row.pendingApprovalCount,
+    pendingUserInputCount: row.pendingUserInputCount,
+    archived: row.archived,
+    // Activity is only known for terminals the server has emitted events for
+    // since this MCP process connected. Null means "no event observed yet".
+    agentState: activity?.agentState ?? null,
+    hasRunningSubprocess: activity?.hasRunningSubprocess ?? null,
+  };
+}
+
+function resolveThread(input: string): ThreadRow {
+  // Accept either an exact thread id (UUID) or a title fuzzy-match.
+  const byId = db.getThread(input);
+  if (byId) return byId;
+  const rows = db.listThreads({ query: input, limit: 5 });
+  if (rows.length === 0) {
+    throw new Error(`no thread found matching "${input}"`);
+  }
+  if (rows.length > 1) {
+    const titles = rows.map((r) => `  - ${r.title} (${r.threadId})`).join("\n");
+    throw new Error(
+      `"${input}" matched ${rows.length} threads — pass the threadId instead:\n${titles}`,
+    );
+  }
+  return rows[0]!;
+}
+
+const server = new McpServer({
+  name: "dpcode-mcp",
+  version: "0.0.1",
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(server.registerTool as any)(
+  "list_threads",
+  {
+    description:
+      "List dpcode threads (Claude/Codex terminal sessions). Filter by project name/path or thread title. Sorted by latest user-message time, then by updatedAt.",
+    inputSchema: {
+      project: z
+        .string()
+        .optional()
+        .describe("Filter by project title or workspace path (substring match)."),
+      query: z
+        .string()
+        .optional()
+        .describe("Substring match against thread titles."),
+      limit: z.number().int().min(1).max(100).optional().describe("Default 25."),
+      includeArchived: z.boolean().optional().describe("Default false."),
+    },
+  },
+  async (args: {
+    project?: string;
+    query?: string;
+    limit?: number;
+    includeArchived?: boolean;
+  }) => {
+    const rows = db.listThreads({
+      project: args.project,
+      query: args.query,
+      limit: args.limit,
+      includeArchived: args.includeArchived,
+    });
+    const threads = rows.map((r) =>
+      describeRow(r, ws.getActivity(r.threadId)),
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify({ threads }, null, 2) }],
+    };
+  },
+);
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(server.registerTool as any)(
+  "read_thread",
+  {
+    description:
+      "Read the rendered terminal scrollback of a dpcode thread. Opens (or reuses) the terminal session, strips ANSI escape codes, and returns the last `lines` lines (default 60). Use this to see what Claude/Codex is currently showing — including pending menus or waiting-for-input prompts.",
+    inputSchema: {
+      thread: z
+        .string()
+        .describe("Thread id (UUID) or a title fragment that uniquely identifies a thread."),
+      lines: z.number().int().min(1).max(2000).optional().describe("Default 60."),
+    },
+  },
+  async (args: { thread: string; lines?: number }) => {
+    const row = resolveThread(args.thread);
+    const snap = await ws.openTerminal({
+      threadId: row.threadId,
+      cwd: row.worktreePath ?? row.workspaceRoot,
+    });
+    const text = stripAnsi(snap.history);
+    const tail = lastLines(text, args.lines ?? 60);
+    const activity = ws.getActivity(row.threadId);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              thread: describeRow(row, activity),
+              terminal: {
+                terminalId: snap.terminalId,
+                cwd: snap.cwd,
+                status: snap.status,
+                pid: snap.pid,
+                updatedAt: snap.updatedAt,
+              },
+              screen: tail,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(server.registerTool as any)(
+  "send_input",
+  {
+    description:
+      "Send text to a dpcode thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
+    inputSchema: {
+      thread: z
+        .string()
+        .describe("Thread id (UUID) or unique title fragment."),
+      text: z.string().min(1).describe("Bytes to send. Use \\r for Enter, \\x1b for ESC."),
+      submit: z
+        .boolean()
+        .optional()
+        .describe("If true (default), append a carriage return so the CLI sees a complete line."),
+    },
+  },
+  async (args: { thread: string; text: string; submit?: boolean }) => {
+    const row = resolveThread(args.thread);
+    // Ensure the terminal session is alive (server will resume the CLI if needed).
+    await ws.openTerminal({
+      threadId: row.threadId,
+      cwd: row.worktreePath ?? row.workspaceRoot,
+    });
+    const submit = args.submit ?? true;
+    const data = submit && !args.text.endsWith("\r") ? `${args.text}\r` : args.text;
+    await ws.writeTerminal({ threadId: row.threadId, data });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              ok: true,
+              threadId: row.threadId,
+              bytesSent: Buffer.byteLength(data, "utf8"),
+              submitted: submit,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(server.registerTool as any)(
+  "wait_for_attention",
+  {
+    description:
+      "Block until the dpcode thread's CLI is idle/waiting for user input (agentState=\"attention\") or until the timeout elapses. Returns the latest activity record and a fresh screen snapshot. Useful after send_input to know when the CLI has finished responding and is ready for the next instruction.",
+    inputSchema: {
+      thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+      timeoutSeconds: z.number().int().min(1).max(900).optional().describe("Default 120."),
+      includeReview: z
+        .boolean()
+        .optional()
+        .describe(
+          "If true, also return when agentState=\"review\" (CLI is waiting on an approval, not a chat prompt). Default false.",
+        ),
+    },
+  },
+  async (args: {
+    thread: string;
+    timeoutSeconds?: number;
+    includeReview?: boolean;
+  }) => {
+    const row = resolveThread(args.thread);
+    await ws.openTerminal({
+      threadId: row.threadId,
+      cwd: row.worktreePath ?? row.workspaceRoot,
+    });
+    const target: ("attention" | "review")[] = args.includeReview
+      ? ["attention", "review"]
+      : ["attention"];
+    const activity = await ws.waitForAgentState(
+      row.threadId,
+      target,
+      (args.timeoutSeconds ?? 120) * 1000,
+    );
+    // Re-fetch a fresh snapshot to return the current screen.
+    const snap = await ws.openTerminal({
+      threadId: row.threadId,
+      cwd: row.worktreePath ?? row.workspaceRoot,
+    });
+    const text = stripAnsi(snap.history);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              threadId: row.threadId,
+              activity,
+              timedOut: !activity || activity.agentState == null
+                ? true
+                : !target.includes(activity.agentState as "attention" | "review"),
+              screen: lastLines(text, 60),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+async function main() {
+  // Connect to dpcode first so we start collecting terminal.event activity
+  // from the moment the MCP starts.
+  try {
+    await ws.connect();
+  } catch (err) {
+    // Defer the error — the MCP still works for `list_threads` (DB-only),
+    // and surfacing it through tool responses is more debuggable than crashing
+    // before the stdio transport is wired up.
+    process.stderr.write(
+      `[dpcode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
+    );
+  }
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((err) => {
+  process.stderr.write(`[dpcode-mcp] fatal: ${(err as Error).stack ?? err}\n`);
+  process.exit(1);
+});
