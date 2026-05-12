@@ -5,8 +5,10 @@
 // readers are safe in WAL mode) and drives terminals via the dpcode WebSocket
 // API (terminal.open / terminal.write + terminal.event push).
 
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { lastLines, stripAnsi } from "./ansi.ts";
 import {
@@ -262,18 +264,95 @@ const server = new McpServer({
   },
 );
 
+function parseBind(raw: string): { host: string; port: number } {
+  // Accepts "host:port", ":port", or "port". Defaults host to 0.0.0.0.
+  const trimmed = raw.trim();
+  if (/^\d+$/.test(trimmed)) return { host: "0.0.0.0", port: Number(trimmed) };
+  const m = trimmed.match(/^(.*?):(\d+)$/);
+  if (!m) throw new Error(`invalid DPCODE_MCP_BIND: ${raw}`);
+  return { host: m[1] || "0.0.0.0", port: Number(m[2]) };
+}
+
+async function readBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  if (chunks.length === 0) return undefined;
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+async function runHttp(bind: { host: string; port: number }, bearer: string | undefined) {
+  // Stateless transport — every request stands on its own, so multiple Tailnet
+  // clients can connect concurrently without session bookkeeping.
+  // Stateless: no session id, every request is independent. The cast is to
+  // satisfy `exactOptionalPropertyTypes`; the SDK explicitly documents
+  // `sessionIdGenerator: undefined` as the way to enable stateless mode.
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined as unknown as () => string,
+  });
+  await (server.connect as (t: unknown) => Promise<void>)(transport);
+
+  const http = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (bearer) {
+      const header = req.headers["authorization"];
+      const provided =
+        typeof header === "string" && header.startsWith("Bearer ")
+          ? header.slice("Bearer ".length)
+          : undefined;
+      if (provided !== bearer) {
+        res.statusCode = 401;
+        res.setHeader("WWW-Authenticate", "Bearer");
+        res.end("unauthorized");
+        return;
+      }
+    }
+    if (req.url && req.url !== "/" && !req.url.startsWith("/mcp")) {
+      res.statusCode = 404;
+      res.end("not found");
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      await transport.handleRequest(req, res, body);
+    } catch (err) {
+      process.stderr.write(
+        `[dpcode-mcp] http error: ${(err as Error).stack ?? err}\n`,
+      );
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end("internal error");
+      }
+    }
+  });
+
+  await new Promise<void>((resolve) => http.listen(bind.port, bind.host, resolve));
+  process.stderr.write(
+    `[dpcode-mcp] listening on http://${bind.host}:${bind.port}/mcp (bearer: ${bearer ? "required" : "off"})\n`,
+  );
+}
+
 async function main() {
   // Connect to dpcode first so we start collecting terminal.event activity
   // from the moment the MCP starts.
   try {
     await ws.connect();
   } catch (err) {
-    // Defer the error — the MCP still works for `list_threads` (DB-only),
-    // and surfacing it through tool responses is more debuggable than crashing
-    // before the stdio transport is wired up.
     process.stderr.write(
       `[dpcode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
     );
+  }
+
+  const bindRaw = process.env.DPCODE_MCP_BIND;
+  if (bindRaw) {
+    await runHttp(parseBind(bindRaw), process.env.DPCODE_MCP_BEARER || undefined);
+    return;
   }
   const transport = new StdioServerTransport();
   await server.connect(transport);
