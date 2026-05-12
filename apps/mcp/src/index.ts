@@ -62,11 +62,16 @@ function resolveThread(input: string): ThreadRow {
   return rows[0]!;
 }
 
-const server = new McpServer({
-  name: "dpcode-mcp",
-  version: "0.0.1",
-});
+function makeServer(): McpServer {
+  const server = new McpServer({
+    name: "dpcode-mcp",
+    version: "0.0.1",
+  });
+  registerTools(server);
+  return server;
+}
 
+function registerTools(server: McpServer): void {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (server.registerTool as any)(
   "list_threads",
@@ -263,6 +268,7 @@ const server = new McpServer({
     };
   },
 );
+}  // end registerTools
 
 function parseBind(raw: string): { host: string; port: number } {
   // Accepts "host:port", ":port", or "port". Defaults host to 0.0.0.0.
@@ -289,16 +295,10 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 async function runHttp(bind: { host: string; port: number }, bearer: string | undefined) {
-  // Stateless transport — every request stands on its own, so multiple Tailnet
-  // clients can connect concurrently without session bookkeeping.
-  // Stateless: no session id, every request is independent. The cast is to
-  // satisfy `exactOptionalPropertyTypes`; the SDK explicitly documents
-  // `sessionIdGenerator: undefined` as the way to enable stateless mode.
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined as unknown as () => string,
-  });
-  await (server.connect as (t: unknown) => Promise<void>)(transport);
-
+  // The SDK's StreamableHTTPServerTransport in stateless mode (sessionIdGenerator: undefined)
+  // is one-shot — it throws on the second handleRequest call. So we mint a fresh
+  // McpServer + transport per HTTP request. Tool registration is cheap; the
+  // long-lived state (dpcode WS client + activity cache) lives outside the McpServer.
   const http = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (bearer) {
       const header = req.headers["authorization"];
@@ -318,7 +318,12 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
       res.end("not found");
       return;
     }
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined as unknown as () => string,
+    });
+    const reqServer = makeServer();
     try {
+      await (reqServer.connect as (t: unknown) => Promise<void>)(transport);
       const body = await readBody(req);
       await transport.handleRequest(req, res, body);
     } catch (err) {
@@ -328,6 +333,13 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
       if (!res.headersSent) {
         res.statusCode = 500;
         res.end("internal error");
+      }
+    } finally {
+      // Best-effort cleanup; transport closes itself when the response finishes.
+      try {
+        await transport.close();
+      } catch {
+        /* ignore */
       }
     }
   });
@@ -355,6 +367,7 @@ async function main() {
     return;
   }
   const transport = new StdioServerTransport();
+  const server = makeServer();
   await server.connect(transport);
 }
 
