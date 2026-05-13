@@ -158,6 +158,13 @@ export interface TerminalManagerShape {
   ) => Effect.Effect<TerminalSessionActivity | null>;
 
   /**
+   * Returns true exactly once if the most recent `open()` for this session
+   * actually spawned a new PTY (vs attaching to an existing one). Used by
+   * auto-launch logic to avoid injecting `claude --resume` into a live TUI.
+   */
+  readonly consumeWasNewlySpawned: (threadId: string, terminalId: string) => Effect.Effect<boolean>;
+
+  /**
    * Subscribe to terminal runtime events.
    */
   readonly subscribe: (listener: (event: TerminalEvent) => void) => Effect.Effect<() => void>;

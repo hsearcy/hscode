@@ -1045,6 +1045,12 @@ interface KillEscalationHandle {
 
 export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> {
   private readonly sessions = new Map<string, TerminalSessionState>();
+  // One-shot flag set when `open()` actually spawned a new PTY (vs attaching
+  // to an existing one). Consumed exactly once via consumeWasNewlySpawned().
+  // Lets callers (wsServer) gate auto-launch logic to first-spawn only —
+  // without this, every attach-to-existing call risks typing a resume command
+  // into a live TUI between turns.
+  private readonly newlySpawnedFlags = new Set<string>();
   private readonly logsDir: string;
   private managedWrapperBinDir: string | null;
   private managedWrapperZshDir: string | null;
@@ -1164,6 +1170,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           lastOutputSignature: null,
         };
         this.sessions.set(sessionKey, session);
+        this.newlySpawnedFlags.add(sessionKey);
         this.evictInactiveSessionsIfNeeded();
         await this.startSession(session, { ...input, cwd: spawnCwd, cols, rows }, "started");
         return this.snapshot(session);
@@ -1336,6 +1343,17 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       await this.startSession(session, { ...input, cols, rows }, "restarted");
       return this.snapshot(session);
     });
+  }
+
+  // Returns true exactly once per fresh spawn — call right after open() to
+  // distinguish "we just created the PTY" from "we attached to an existing
+  // one." Used to gate auto-launch logic that would otherwise inject input
+  // into a live TUI.
+  consumeWasNewlySpawned(threadId: string, terminalId: string): boolean {
+    const key = toSessionKey(threadId, terminalId);
+    if (!this.newlySpawnedFlags.has(key)) return false;
+    this.newlySpawnedFlags.delete(key);
+    return true;
   }
 
   getSessionActivity(
@@ -2320,6 +2338,8 @@ export const TerminalManagerLive = Layer.effect(
         }),
       getSessionActivity: (threadId, terminalId) =>
         Effect.sync(() => runtime.getSessionActivity(threadId, terminalId)),
+      consumeWasNewlySpawned: (threadId, terminalId) =>
+        Effect.sync(() => runtime.consumeWasNewlySpawned(threadId, terminalId)),
       subscribe: (listener) =>
         Effect.sync(() => {
           runtime.on("event", listener);

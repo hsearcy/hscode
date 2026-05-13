@@ -2407,7 +2407,17 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         const body = stripRequestTag(request.body);
         terminalTitleTracker.reset(body.threadId, body.terminalId ?? DEFAULT_TERMINAL_ID);
         const snapshot = yield* terminalManager.open(body);
+        const terminalId = body.terminalId ?? DEFAULT_TERMINAL_ID;
+        // Only run auto-launch logic when this open() actually spawned a fresh
+        // PTY. Attaching to an existing session must NOT type a resume command
+        // into the live TUI, which has happened (`Stop` hook event zeroes out
+        // activity.hasRunningSubprocess between turns, fooling the old check).
+        const wasNewlySpawned = yield* terminalManager.consumeWasNewlySpawned(
+          body.threadId,
+          terminalId,
+        );
         yield* Effect.gen(function* () {
+          if (!wasNewlySpawned) return;
           const readModel = yield* orchestrationEngine.getReadModel();
           const thread = readModel.threads.find((t) => t.id === body.threadId);
           if (!thread || thread.interactionMode !== "terminal-cli") {
@@ -2426,10 +2436,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           }
           const row = threadRow.value;
           const launched = row.cliLaunchedOnce;
-          // If the PTY already has the matching CLI live (managed-agent mid-turn
-          // or a detected subprocess matching this thread's CLI), don't auto-type
-          // a resume command — it would land in Claude's prompt as user input.
-          const terminalId = body.terminalId ?? DEFAULT_TERMINAL_ID;
+          // Defense in depth: if the PTY already has the matching CLI live
+          // (managed-agent mid-turn or a detected subprocess matching this
+          // thread's CLI), don't auto-type a resume command. With the
+          // wasNewlySpawned gate above this should rarely fire, but it
+          // protects against races where the PTY was reused.
           const activity = yield* terminalManager.getSessionActivity(body.threadId, terminalId);
           if (
             activity &&
