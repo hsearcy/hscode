@@ -14,6 +14,7 @@ import {
 
 import { useStore } from "../store";
 import { createProjectSelector, createThreadSelector } from "../storeSelectors";
+import { useTerminalStateStore } from "../terminalStateStore";
 import {
   buildTerminalRuntimeKey,
   terminalRuntimeRegistry,
@@ -24,15 +25,6 @@ import type {
 } from "./terminal/terminalRuntimeTypes";
 
 const TERMINAL_ID = "default";
-
-const noopMetadata = (
-  _terminalId: string,
-  _metadata: { cliKind: TerminalCliKind | null; label: string },
-) => {};
-const noopActivity = (
-  _terminalId: string,
-  _activity: { hasRunningSubprocess: boolean; agentState: TerminalActivityState | null },
-) => {};
 
 interface ThreadTerminalCliPaneProps {
   threadId: ThreadId;
@@ -53,6 +45,9 @@ export default function ThreadTerminalCliPane({ threadId }: ThreadTerminalCliPan
   const containerRef = useRef<HTMLDivElement>(null);
   const runtimeKey = useMemo(() => buildTerminalRuntimeKey(threadId, TERMINAL_ID), [threadId]);
 
+  const setTerminalMetadata = useTerminalStateStore((s) => s.setTerminalMetadata);
+  const setTerminalActivity = useTerminalStateStore((s) => s.setTerminalActivity);
+
   const runtimeConfig = useMemo<TerminalRuntimeConfig>(
     () => ({
       runtimeKey,
@@ -63,11 +58,24 @@ export default function ThreadTerminalCliPane({ threadId }: ThreadTerminalCliPan
       cwd,
       callbacks: {
         onSessionExited: () => {},
-        onTerminalMetadataChange: noopMetadata,
-        onTerminalActivityChange: noopActivity,
+        onTerminalMetadataChange: (
+          terminalId: string,
+          metadata: { cliKind: TerminalCliKind | null; label: string },
+        ) => {
+          setTerminalMetadata(threadId, terminalId, metadata);
+        },
+        onTerminalActivityChange: (
+          terminalId: string,
+          activity: {
+            hasRunningSubprocess: boolean;
+            agentState: TerminalActivityState | null;
+          },
+        ) => {
+          setTerminalActivity(threadId, terminalId, activity);
+        },
       },
     }),
-    [cliKind, cwd, runtimeKey, terminalLabel, threadId],
+    [cliKind, cwd, runtimeKey, setTerminalActivity, setTerminalMetadata, terminalLabel, threadId],
   );
 
   const runtimeConfigRef = useRef(runtimeConfig);

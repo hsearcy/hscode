@@ -118,9 +118,17 @@ fi
 
 _t3code_emit_osc() {
   _t3code_sequence="$1"
+  # The wrapper script captured the PTY device path in T3CODE_TERMINAL_TTY
+  # before exec'ing the CLI. Claude 2.1+ runs hooks detached from /dev/tty,
+  # so this captured path is the only reliable way to push OSC bytes back
+  # onto the PTY where the server's sanitizer can see them. Falling back
+  # to stdout is a last resort — Claude swallows hook stdout, so anything
+  # printed there is invisible to the server.
+  if [ -n "\${T3CODE_TERMINAL_TTY:-}" ] && [ -w "$T3CODE_TERMINAL_TTY" ]; then
+    printf '%b' "$_t3code_sequence" > "$T3CODE_TERMINAL_TTY" 2>/dev/null && return
+  fi
   if [ -w /dev/tty ]; then
-    printf '%b' "$_t3code_sequence" > /dev/tty 2>/dev/null || printf '%b' "$_t3code_sequence"
-    return
+    printf '%b' "$_t3code_sequence" > /dev/tty 2>/dev/null && return
   fi
   printf '%b' "$_t3code_sequence"
 }
@@ -336,6 +344,16 @@ function buildWrapperScript(input: {
     `# Managed ${commandName} wrapper injected by t3code terminal sessions.`,
     `printf '\\033]0;%s\\007' ${shellQuote(title)}`,
     `export ${T3CODE_TERMINAL_CLI_KIND_ENV_KEY}=${shellQuote(cliKind)}`,
+    // Capture the PTY device path here (while we still have a usable
+    // controlling terminal) so the hook subprocess — which Claude 2.1+
+    // launches detached from /dev/tty — can still emit OSC sequences
+    // back to the PTY for the server's sanitizer to parse.
+    'if [ -z "${T3CODE_TERMINAL_TTY:-}" ]; then',
+    '  _t3code_tty="$(tty 2>/dev/null || true)"',
+    '  case "$_t3code_tty" in',
+    '    /dev/*) export T3CODE_TERMINAL_TTY="$_t3code_tty" ;;',
+    "  esac",
+    "fi",
     commandBody,
     "",
   ].join("\n");

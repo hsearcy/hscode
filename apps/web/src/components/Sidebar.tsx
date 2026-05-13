@@ -4237,6 +4237,8 @@ export default function Sidebar() {
             </span>
           ) : threadEntryPoint === "terminal" ? (
             <TerminalIcon aria-hidden="true" className="size-3.5 shrink-0 text-teal-600/85" />
+          ) : thread.interactionMode === "terminal-cli" ? (
+            <TerminalCliGlyph cliKind={thread.cliKind ?? null} />
           ) : (
             <ProviderAvatarWithTerminal
               provider={thread.modelSelection.provider}
