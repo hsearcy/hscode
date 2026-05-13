@@ -57,14 +57,17 @@ export function discoverDesktopDpcode(): {
     }
     const port = env.get("DPCODE_PORT") ?? env.get("T3CODE_PORT");
     if (!port) continue;
-    const token =
-      env.get("DPCODE_AUTH_TOKEN") ||
-      env.get("T3CODE_AUTH_TOKEN") ||
-      undefined;
+    const token = env.get("DPCODE_AUTH_TOKEN") || env.get("T3CODE_AUTH_TOKEN") || undefined;
     const host = env.get("DPCODE_HOST") ?? env.get("T3CODE_HOST") ?? "127.0.0.1";
     return { wsUrl: `ws://${host}:${port}`, authToken: token };
   }
   return null;
+}
+
+export interface ProjectRow {
+  projectId: string;
+  title: string;
+  workspaceRoot: string;
 }
 
 export interface ThreadRow {
@@ -105,9 +108,7 @@ export class DpcodeDb {
     const params: Record<string, string | number> = {};
     if (!opts.includeArchived) conditions.push("t.archived_at IS NULL");
     if (opts.project) {
-      conditions.push(
-        "(p.title LIKE $project OR p.workspace_root LIKE $project)",
-      );
+      conditions.push("(p.title LIKE $project OR p.workspace_root LIKE $project)");
       params.$project = `%${opts.project}%`;
     }
     if (opts.query) {
@@ -149,6 +150,25 @@ export class DpcodeDb {
     }));
   }
 
+  findProjects(query: string, limit = 5): ProjectRow[] {
+    const sql = `
+      SELECT project_id, title, workspace_root
+      FROM projection_projects
+      WHERE deleted_at IS NULL
+        AND (title LIKE $q OR workspace_root LIKE $q)
+      ORDER BY updated_at DESC
+      LIMIT $limit
+    `;
+    const rows = this.db.query(sql).all({ $q: `%${query}%`, $limit: limit }) as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((r) => ({
+      projectId: String(r.project_id),
+      title: String(r.title),
+      workspaceRoot: String(r.workspace_root),
+    }));
+  }
+
   getThread(threadId: string): ThreadRow | null {
     const sql = `
       SELECT t.thread_id, t.project_id, p.title AS project_title,
@@ -161,9 +181,7 @@ export class DpcodeDb {
       JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.thread_id = $id AND t.deleted_at IS NULL
     `;
-    const r = this.db.query(sql).get({ $id: threadId }) as
-      | Record<string, unknown>
-      | null;
+    const r = this.db.query(sql).get({ $id: threadId }) as Record<string, unknown> | null;
     if (!r) return null;
     return {
       threadId: String(r.thread_id),
@@ -229,7 +247,11 @@ export class DpcodeWs {
 
   async connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
-    this.connectPromise = new Promise<void>((resolve, reject) => {
+    // Resetter: any rejection path below must null out connectPromise so the
+    // next connect() retries discovery. Otherwise an MCP daemon that started
+    // before the desktop app would cache the "No dpcode backend found" error
+    // forever.
+    const attempt = new Promise<void>((resolve, reject) => {
       // Resolve endpoint freshly on each connect. Manual DPCODE_MCP_URL wins;
       // otherwise auto-discover from the running desktop backend (port +
       // token rotate per AppImage launch).
@@ -260,15 +282,21 @@ export class DpcodeWs {
         if (this.pending.size === 0) reject(err);
       });
       ws.on("close", () => {
-        for (const [, p] of this.pending)
-          p.reject(new Error("dpcode websocket closed"));
+        for (const [, p] of this.pending) p.reject(new Error("dpcode websocket closed"));
         this.pending.clear();
         this.ws = null;
         this.connectPromise = null;
       });
       ws.on("message", (raw) => this.handleMessage(raw.toString()));
     });
-    return this.connectPromise;
+    this.connectPromise = attempt;
+    // If this attempt rejects (no backend, connection error, etc), drop the
+    // cached promise so a later connect() retries instead of replaying the
+    // failure forever.
+    attempt.catch(() => {
+      if (this.connectPromise === attempt) this.connectPromise = null;
+    });
+    return attempt;
   }
 
   private handleMessage(raw: string) {
@@ -365,11 +393,13 @@ export class DpcodeWs {
     });
   }
 
-  writeTerminal(input: {
-    threadId: string;
-    data: string;
-    terminalId?: string;
-  }): Promise<void> {
+  dispatchOrchestrationCommand(command: Record<string, unknown>): Promise<{ sequence: number }> {
+    return this.request<{ sequence: number }>("orchestration.dispatchCommand", {
+      command,
+    });
+  }
+
+  writeTerminal(input: { threadId: string; data: string; terminalId?: string }): Promise<void> {
     return this.request<void>("terminal.write", {
       threadId: input.threadId,
       terminalId: input.terminalId ?? "default",
