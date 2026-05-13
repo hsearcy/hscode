@@ -9,12 +9,17 @@ A stdio MCP server that exposes dpcode threads (Claude / Codex terminal sessions
 
 ## Tools
 
-| Tool | Purpose |
-| --- | --- |
-| `list_threads({project?, query?, limit?})` | Enumerate threads, sorted by latest user-message time. |
-| `read_thread({thread, lines?})` | Return rendered terminal scrollback (ANSI-stripped). |
-| `send_input({thread, text, submit?})` | Send keystrokes; appends `\r` by default. |
-| `wait_for_attention({thread, timeoutSeconds?, includeReview?})` | Block until the CLI is idle/waiting for input. |
+| Tool                                                                                    | Purpose                                                                                                             |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `list_threads({project?, query?, limit?})`                                              | Enumerate threads, sorted by latest user-message time.                                                              |
+| `read_thread({thread, lines?})`                                                         | Return rendered terminal scrollback (ANSI-stripped).                                                                |
+| `send_input({thread, text, submit?})`                                                   | Send keystrokes; appends `\r` by default.                                                                           |
+| `wait_for_attention({thread, timeoutSeconds?, permissionPromptOnly?})`                  | Block until the CLI is idle (turn complete or approval prompt).                                                     |
+| `start_thread({project, provider, title?, openTerminal?})`                              | Create a new Claude / Codex CLI thread in a project (equivalent to "New Thread → Claude Code / Codex" in the app).  |
+| `notify_on_idle({thread, notifyUrl, timeoutSeconds?, permissionPromptOnly?, headers?})` | Register a webhook fired once when the thread next goes idle. Non-blocking — caller returns immediately.            |
+| `subscribe_threads({notifyUrl, states?, screenScope?, minIntervalMs?, headers?})`       | Register a webhook called on every thread's idle transitions across the whole desktop. Throttled and screen-scoped. |
+| `unsubscribe_threads({subscriptionId?})`                                                | Remove a `subscribe_threads` subscription; omit id to clear all.                                                    |
+| `list_subscriptions({})`                                                                | Inspect active subscriptions.                                                                                       |
 
 `thread` accepts either a thread UUID or a substring of the thread title.
 

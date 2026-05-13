@@ -5,23 +5,160 @@
 // readers are safe in WAL mode) and drives terminals via the dpcode WebSocket
 // API (terminal.open / terminal.write + terminal.event push).
 
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { lastMeaningfulLines, renderTerminal } from "./ansi.ts";
+import { lastAssistantTurn, lastMeaningfulLines, renderTerminal } from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
   loadConfig,
+  type ProjectRow,
   type TerminalActivity,
   type ThreadRow,
 } from "./dpcodeClient.ts";
 
+const DEFAULT_MODEL_BY_PROVIDER = {
+  codex: "gpt-5.5",
+  claudeAgent: "claude-sonnet-4-6",
+} as const;
+
+function resolveProject(input: string): ProjectRow {
+  const matches = db.findProjects(input, 5);
+  if (matches.length === 0) {
+    throw new Error(`no project found matching "${input}"`);
+  }
+  if (matches.length > 1) {
+    const listed = matches
+      .map((m) => `  - ${m.title} (${m.workspaceRoot}) [${m.projectId}]`)
+      .join("\n");
+    throw new Error(
+      `"${input}" matched ${matches.length} projects — narrow the query or pass the projectId:\n${listed}`,
+    );
+  }
+  return matches[0]!;
+}
+
 const cfg = loadConfig();
 const db = new DpcodeDb(cfg.homeDir);
 const ws = new DpcodeWs(cfg);
+
+// ── Global thread-event subscriptions (webhook fan-out) ──────────────────
+//
+// Remote callers register a webhook once and dpcode-mcp POSTs to it every
+// time *any* thread's agentState transitions. Events only flow for terminals
+// the server has opened (web client, another MCP, or this process via
+// read_thread/notify_on_idle), so newly created threads won't appear until
+// someone opens them.
+
+type ScreenScope = "off" | "tail" | "lastTurn";
+
+interface ThreadEventSubscription {
+  id: string;
+  url: string;
+  headers: Record<string, string>;
+  states: Array<"running" | "attention" | "review">; // empty = all transitions
+  screenScope: ScreenScope;
+  minIntervalMs: number;
+  lastFiredAt: Map<string, number>; // threadId → ms timestamp of last POST
+}
+
+const subscriptions = new Map<string, ThreadEventSubscription>();
+const lastStateByThread = new Map<string, string | null>();
+let pushHandlerInstalled = false;
+
+function ensureGlobalPushHandler(): void {
+  if (pushHandlerInstalled) return;
+  pushHandlerInstalled = true;
+  ws.onPush((channel, data) => {
+    if (channel !== "terminal.event" || !data || typeof data !== "object") return;
+    const ev = data as Record<string, unknown>;
+    if (ev.type !== "activity") return;
+    const threadId = typeof ev.threadId === "string" ? ev.threadId : null;
+    if (!threadId) return;
+    const state = (ev.agentState as string | null | undefined) ?? null;
+    const prev = lastStateByThread.get(threadId) ?? null;
+    if (state === prev) return; // dedupe non-transitions
+    lastStateByThread.set(threadId, state);
+    if (subscriptions.size === 0) return;
+    void fanOutThreadEvent({ threadId, state, ev });
+  });
+}
+
+async function fanOutThreadEvent(input: {
+  threadId: string;
+  state: string | null;
+  ev: Record<string, unknown>;
+}): Promise<void> {
+  // Resolve the rendered scrollback once if anyone wants it. We render the
+  // full thing here and let each subscriber pick its slice (tail vs lastTurn).
+  let renderedText: string | null = null;
+  const needsScreen = Array.from(subscriptions.values()).some((s) => s.screenScope !== "off");
+  if (needsScreen) {
+    try {
+      const row = db.getThread(input.threadId);
+      if (row) {
+        const snap = await ws.openTerminal({
+          threadId: row.threadId,
+          cwd: row.worktreePath ?? row.workspaceRoot,
+        });
+        renderedText = await renderTerminal(snap.history);
+      }
+    } catch {
+      // Best-effort.
+    }
+  }
+  const firedAt = new Date().toISOString();
+  await Promise.all(
+    Array.from(subscriptions.values()).map(async (sub) => {
+      if (
+        sub.states.length > 0 &&
+        (!input.state || !sub.states.includes(input.state as "running" | "attention" | "review"))
+      ) {
+        return;
+      }
+      if (sub.minIntervalMs > 0) {
+        const now = Date.now();
+        const last = sub.lastFiredAt.get(input.threadId) ?? 0;
+        if (now - last < sub.minIntervalMs) return;
+        sub.lastFiredAt.set(input.threadId, now);
+      }
+      const payload: Record<string, unknown> = {
+        subscriptionId: sub.id,
+        threadId: input.threadId,
+        agentState: input.state,
+        firedAt,
+        activity: input.ev,
+      };
+      if (sub.screenScope !== "off" && renderedText !== null) {
+        payload.screen =
+          sub.screenScope === "lastTurn"
+            ? lastAssistantTurn(renderedText)
+            : lastMeaningfulLines(renderedText, 80);
+        payload.screenScope = sub.screenScope;
+      }
+      try {
+        await fetch(sub.url, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...sub.headers },
+          body: JSON.stringify(payload),
+        });
+      } catch (err) {
+        console.error(
+          `[dpcode-mcp] subscribe_threads: POST to ${sub.url} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }),
+  );
+}
 
 function describeRow(row: ThreadRow, activity?: TerminalActivity | null) {
   return {
@@ -72,209 +209,572 @@ function makeServer(): McpServer {
 }
 
 function registerTools(server: McpServer): void {
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(server.registerTool as any)(
-  "list_threads",
-  {
-    description:
-      "List dpcode threads (Claude/Codex terminal sessions). Filter by project name/path or thread title. Sorted by latest user-message time, then by updatedAt.",
-    inputSchema: {
-      project: z
-        .string()
-        .optional()
-        .describe("Filter by project title or workspace path (substring match)."),
-      query: z
-        .string()
-        .optional()
-        .describe("Substring match against thread titles."),
-      limit: z.number().int().min(1).max(100).optional().describe("Default 25."),
-      includeArchived: z.boolean().optional().describe("Default false."),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "list_threads",
+    {
+      description:
+        "List dpcode threads (Claude/Codex terminal sessions). Filter by project name/path or thread title. Sorted by latest user-message time, then by updatedAt.",
+      inputSchema: {
+        project: z
+          .string()
+          .optional()
+          .describe("Filter by project title or workspace path (substring match)."),
+        query: z.string().optional().describe("Substring match against thread titles."),
+        limit: z.number().int().min(1).max(100).optional().describe("Default 25."),
+        includeArchived: z.boolean().optional().describe("Default false."),
+      },
     },
-  },
-  async (args: {
-    project?: string;
-    query?: string;
-    limit?: number;
-    includeArchived?: boolean;
-  }) => {
-    const rows = db.listThreads({
-      project: args.project,
-      query: args.query,
-      limit: args.limit,
-      includeArchived: args.includeArchived,
-    });
-    const threads = rows.map((r) =>
-      describeRow(r, ws.getActivity(r.threadId)),
-    );
-    return {
-      content: [{ type: "text", text: JSON.stringify({ threads }, null, 2) }],
-    };
-  },
-);
+    async (args: {
+      project?: string;
+      query?: string;
+      limit?: number;
+      includeArchived?: boolean;
+    }) => {
+      const rows = db.listThreads({
+        project: args.project,
+        query: args.query,
+        limit: args.limit,
+        includeArchived: args.includeArchived,
+      });
+      const threads = rows.map((r) => describeRow(r, ws.getActivity(r.threadId)));
+      return {
+        content: [{ type: "text", text: JSON.stringify({ threads }, null, 2) }],
+      };
+    },
+  );
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(server.registerTool as any)(
-  "read_thread",
-  {
-    description:
-      "Read the rendered terminal scrollback of a dpcode thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
-      "Interpreting the output (Claude Code / Codex TUI):\n" +
-      "- Lines starting with `> ` (chat-bubble blocks in scrollback) are messages the USER actually sent. These are historical.\n" +
-      "- Lines starting with `● ` are messages the ASSISTANT sent (Claude's responses, tool calls).\n" +
-      "- A single line near the bottom that looks like `❯ <text>` bracketed by two horizontal rule lines (`────...`) is the CURRENT INPUT BOX DRAFT — text auto-populated by the CLI (e.g. a suggested next prompt) that has NOT been sent yet. Treat it as a draft, not a message.\n" +
-      "- `✻ Cooked for Ns` / `※ recap: ...` / `⏵⏵ auto mode on ...` are TUI status decorations, not user/assistant content.\n" +
-      "- If the screen looks sparse or all spinner-like, the CLI is mid-turn; either `wait_for_attention` or call `read_thread` again shortly.",
-    inputSchema: {
-      thread: z
-        .string()
-        .describe("Thread id (UUID) or a title fragment that uniquely identifies a thread."),
-      lines: z.number().int().min(1).max(2000).optional().describe("Default 60."),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "read_thread",
+    {
+      description:
+        "Read the rendered terminal scrollback of a dpcode thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
+        "Interpreting the output (Claude Code / Codex TUI):\n" +
+        "- Lines starting with `> ` (chat-bubble blocks in scrollback) are messages the USER actually sent. These are historical.\n" +
+        "- Lines starting with `● ` are messages the ASSISTANT sent (Claude's responses, tool calls).\n" +
+        "- A single line near the bottom that looks like `❯ <text>` bracketed by two horizontal rule lines (`────...`) is the CURRENT INPUT BOX DRAFT — text auto-populated by the CLI (e.g. a suggested next prompt) that has NOT been sent yet. Treat it as a draft, not a message.\n" +
+        "- `✻ Cooked for Ns` / `※ recap: ...` / `⏵⏵ auto mode on ...` are TUI status decorations, not user/assistant content.\n" +
+        "- If the screen looks sparse or all spinner-like, the CLI is mid-turn; either `wait_for_attention` or call `read_thread` again shortly.",
+      inputSchema: {
+        thread: z
+          .string()
+          .describe("Thread id (UUID) or a title fragment that uniquely identifies a thread."),
+        lines: z.number().int().min(1).max(2000).optional().describe("Default 60."),
+      },
     },
-  },
-  async (args: { thread: string; lines?: number }) => {
-    const row = resolveThread(args.thread);
-    const snap = await ws.openTerminal({
-      threadId: row.threadId,
-      cwd: row.worktreePath ?? row.workspaceRoot,
-    });
-    const text = await renderTerminal(snap.history);
-    const tail = lastMeaningfulLines(text, args.lines ?? 80);
-    const activity = ws.getActivity(row.threadId);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              thread: describeRow(row, activity),
-              terminal: {
-                terminalId: snap.terminalId,
-                cwd: snap.cwd,
-                status: snap.status,
-                pid: snap.pid,
-                updatedAt: snap.updatedAt,
+    async (args: { thread: string; lines?: number }) => {
+      const row = resolveThread(args.thread);
+      const snap = await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const text = await renderTerminal(snap.history);
+      const tail = lastMeaningfulLines(text, args.lines ?? 80);
+      const activity = ws.getActivity(row.threadId);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                thread: describeRow(row, activity),
+                terminal: {
+                  terminalId: snap.terminalId,
+                  cwd: snap.cwd,
+                  status: snap.status,
+                  pid: snap.pid,
+                  updatedAt: snap.updatedAt,
+                },
+                screen: tail,
               },
-              screen: tail,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
-  },
-);
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(server.registerTool as any)(
-  "send_input",
-  {
-    description:
-      "Send text to a dpcode thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
-    inputSchema: {
-      thread: z
-        .string()
-        .describe("Thread id (UUID) or unique title fragment."),
-      text: z.string().min(1).describe("Bytes to send. Use \\r for Enter, \\x1b for ESC."),
-      submit: z
-        .boolean()
-        .optional()
-        .describe("If true (default), append a carriage return so the CLI sees a complete line."),
+              null,
+              2,
+            ),
+          },
+        ],
+      };
     },
-  },
-  async (args: { thread: string; text: string; submit?: boolean }) => {
-    const row = resolveThread(args.thread);
-    // Ensure the terminal session is alive (server will resume the CLI if needed).
-    await ws.openTerminal({
-      threadId: row.threadId,
-      cwd: row.worktreePath ?? row.workspaceRoot,
-    });
-    const submit = args.submit ?? true;
-    const data = submit && !args.text.endsWith("\r") ? `${args.text}\r` : args.text;
-    await ws.writeTerminal({ threadId: row.threadId, data });
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              ok: true,
-              threadId: row.threadId,
-              bytesSent: Buffer.byteLength(data, "utf8"),
-              submitted: submit,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
-  },
-);
+  );
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(server.registerTool as any)(
-  "wait_for_attention",
-  {
-    description:
-      "Block until the dpcode thread's CLI is idle/waiting for user input (agentState=\"attention\") or until the timeout elapses. Returns the latest activity record and a fresh screen snapshot. Useful after send_input to know when the CLI has finished responding and is ready for the next instruction.",
-    inputSchema: {
-      thread: z.string().describe("Thread id (UUID) or unique title fragment."),
-      timeoutSeconds: z.number().int().min(1).max(900).optional().describe("Default 120."),
-      includeReview: z
-        .boolean()
-        .optional()
-        .describe(
-          "If true, also return when agentState=\"review\" (CLI is waiting on an approval, not a chat prompt). Default false.",
-        ),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "send_input",
+    {
+      description:
+        "Send text to a dpcode thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
+      inputSchema: {
+        thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+        text: z.string().min(1).describe("Bytes to send. Use \\r for Enter, \\x1b for ESC."),
+        submit: z
+          .boolean()
+          .optional()
+          .describe("If true (default), append a carriage return so the CLI sees a complete line."),
+      },
     },
-  },
-  async (args: {
-    thread: string;
-    timeoutSeconds?: number;
-    includeReview?: boolean;
-  }) => {
-    const row = resolveThread(args.thread);
-    await ws.openTerminal({
-      threadId: row.threadId,
-      cwd: row.worktreePath ?? row.workspaceRoot,
-    });
-    const target: ("attention" | "review")[] = args.includeReview
-      ? ["attention", "review"]
-      : ["attention"];
-    const activity = await ws.waitForAgentState(
-      row.threadId,
-      target,
-      (args.timeoutSeconds ?? 120) * 1000,
-    );
-    // Re-fetch a fresh snapshot to return the current screen.
-    const snap = await ws.openTerminal({
-      threadId: row.threadId,
-      cwd: row.worktreePath ?? row.workspaceRoot,
-    });
-    const text = await renderTerminal(snap.history);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              threadId: row.threadId,
-              activity,
-              timedOut: !activity || activity.agentState == null
-                ? true
-                : !target.includes(activity.agentState as "attention" | "review"),
-              screen: lastMeaningfulLines(text, 80),
-            },
-            null,
-            2,
+    async (args: { thread: string; text: string; submit?: boolean }) => {
+      const row = resolveThread(args.thread);
+      // Ensure the terminal session is alive (server will resume the CLI if needed).
+      await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const submit = args.submit ?? true;
+      const data = submit && !args.text.endsWith("\r") ? `${args.text}\r` : args.text;
+      await ws.writeTerminal({ threadId: row.threadId, data });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                threadId: row.threadId,
+                bytesSent: Buffer.byteLength(data, "utf8"),
+                submitted: submit,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "wait_for_attention",
+    {
+      description:
+        'Block until the dpcode thread\'s CLI is idle — either it has finished a turn (agentState="review") or it is sitting on a permission prompt (agentState="attention") — or until the timeout elapses. Returns the latest activity record and a fresh screen snapshot. Useful after send_input to know when the CLI has finished responding and is ready for the next instruction.\n\nNote: in this codebase "review" is the post-turn idle state (CLI just stopped streaming) and "attention" is specifically a permission/approval prompt. By default this waits for either. Set permissionPromptOnly=true to wait only for an approval prompt.',
+      inputSchema: {
+        thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+        timeoutSeconds: z.number().int().min(1).max(900).optional().describe("Default 120."),
+        permissionPromptOnly: z
+          .boolean()
+          .optional()
+          .describe(
+            'If true, only return when agentState="attention" (CLI is waiting on an approval prompt). Default false — also returns on agentState="review" (turn complete).',
           ),
-        },
-      ],
-    };
-  },
-);
-}  // end registerTools
+      },
+    },
+    async (args: { thread: string; timeoutSeconds?: number; permissionPromptOnly?: boolean }) => {
+      const row = resolveThread(args.thread);
+      await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const target: ("attention" | "review")[] = args.permissionPromptOnly
+        ? ["attention"]
+        : ["attention", "review"];
+      const activity = await ws.waitForAgentState(
+        row.threadId,
+        target,
+        (args.timeoutSeconds ?? 120) * 1000,
+      );
+      // Re-fetch a fresh snapshot to return the current screen.
+      const snap = await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const text = await renderTerminal(snap.history);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                threadId: row.threadId,
+                activity,
+                timedOut:
+                  !activity || activity.agentState == null
+                    ? true
+                    : !target.includes(activity.agentState as "attention" | "review"),
+                screen: lastMeaningfulLines(text, 80),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "notify_on_idle",
+    {
+      description:
+        'Register a webhook to be called when a dpcode thread\'s CLI goes idle (turn complete or sitting on an approval prompt). Unlike `wait_for_attention`, this returns IMMEDIATELY — the caller\'s turn is not blocked. A background watcher POSTs JSON to `notifyUrl` once the thread reaches the target agent state (`review` for turn-complete, `attention` for permission prompt) or when the timeout elapses. Useful for remote agents that should not hold an HTTP request open for minutes.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "threadId": "<uuid>",\n  "agentState": "review" | "attention" | null,\n  "timedOut": boolean,\n  "screen": "<last 80 meaningful lines of terminal scrollback>",\n  "activity": { ... raw activity record ... } | null\n}\n```\nThe webhook is best-effort: failures to POST are logged but not retried.',
+      inputSchema: {
+        thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+        notifyUrl: z
+          .string()
+          .url()
+          .describe("Absolute http(s) URL to POST to when the thread goes idle (or times out)."),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(3600)
+          .optional()
+          .describe("Default 600 (10 min). Webhook still fires on timeout with timedOut=true."),
+        permissionPromptOnly: z
+          .boolean()
+          .optional()
+          .describe(
+            'If true, only fire on agentState="attention" (approval prompt). Default false — also fires on "review" (turn complete).',
+          ),
+        headers: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            "Optional extra HTTP headers to send with the webhook POST (e.g. an auth token).",
+          ),
+      },
+    },
+    async (args: {
+      thread: string;
+      notifyUrl: string;
+      timeoutSeconds?: number;
+      permissionPromptOnly?: boolean;
+      headers?: Record<string, string>;
+    }) => {
+      const row = resolveThread(args.thread);
+      // Ensure the terminal session is alive so activity events start flowing.
+      await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const target: ("attention" | "review")[] = args.permissionPromptOnly
+        ? ["attention"]
+        : ["attention", "review"];
+      const timeoutSeconds = args.timeoutSeconds ?? 600;
+      const scheduledAt = new Date().toISOString();
+      // Fire-and-forget: the tool replies immediately; the watcher posts later.
+      void (async () => {
+        let payload: Record<string, unknown>;
+        try {
+          const activity = await ws.waitForAgentState(row.threadId, target, timeoutSeconds * 1000);
+          const snap = await ws.openTerminal({
+            threadId: row.threadId,
+            cwd: row.worktreePath ?? row.workspaceRoot,
+          });
+          const text = await renderTerminal(snap.history);
+          const screen = lastMeaningfulLines(text, 80);
+          const state = activity?.agentState ?? null;
+          payload = {
+            threadId: row.threadId,
+            agentState: state,
+            timedOut: !state || !target.includes(state as "attention" | "review"),
+            screen,
+            activity,
+            scheduledAt,
+            firedAt: new Date().toISOString(),
+          };
+        } catch (err) {
+          payload = {
+            threadId: row.threadId,
+            error: err instanceof Error ? err.message : String(err),
+            scheduledAt,
+            firedAt: new Date().toISOString(),
+          };
+        }
+        try {
+          await fetch(args.notifyUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(args.headers ?? {}),
+            },
+            body: JSON.stringify(payload),
+          });
+        } catch (err) {
+          // Best-effort. Log to stderr so it shows up in the MCP server logs.
+          console.error(
+            `[dpcode-mcp] notify_on_idle: POST to ${args.notifyUrl} failed:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      })();
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                watching: true,
+                threadId: row.threadId,
+                notifyUrl: args.notifyUrl,
+                target,
+                timeoutSeconds,
+                scheduledAt,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "subscribe_threads",
+    {
+      description:
+        'Register a webhook to receive a POST every time ANY dpcode thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the dpcode server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<last 80 lines, if includeScreen=true>"\n}\n```',
+      inputSchema: {
+        notifyUrl: z
+          .string()
+          .url()
+          .describe("Absolute http(s) URL to POST every matching thread event to."),
+        states: z
+          .array(z.enum(["running", "attention", "review"]))
+          .optional()
+          .describe(
+            'Which agentState transitions to forward. Default ["review", "attention"] — only idle states. Pass [] (empty) to forward EVERY transition including "running" and null/idle.',
+          ),
+        includeScreen: z
+          .boolean()
+          .optional()
+          .describe(
+            'DEPRECATED — use `screenScope` instead. If true (and screenScope is omitted), behaves as screenScope="lastTurn".',
+          ),
+        screenScope: z
+          .enum(["off", "tail", "lastTurn"])
+          .optional()
+          .describe(
+            'What slice of the terminal to include in `screen`. "off" (default) omits the screen entirely. "lastTurn" returns just the assistant\'s most recent response (everything below the last user-message marker, with the input composer stripped) — usually what you want to know "what just happened". "tail" returns the last 80 meaningful lines, like read_thread.',
+          ),
+        minIntervalMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(60000)
+          .optional()
+          .describe(
+            "Minimum milliseconds between POSTs for the same thread on this subscription. Default 2000 (2 s). Set to 0 to disable throttling.",
+          ),
+        headers: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe("Optional extra HTTP headers (e.g. an auth token)."),
+      },
+    },
+    async (args: {
+      notifyUrl: string;
+      states?: Array<"running" | "attention" | "review">;
+      includeScreen?: boolean;
+      screenScope?: ScreenScope;
+      minIntervalMs?: number;
+      headers?: Record<string, string>;
+    }) => {
+      // Make sure the WS is connected so we receive terminal.event pushes.
+      await ws.connect();
+      ensureGlobalPushHandler();
+      const id = randomUUID();
+      // Resolve the screen scope from the new field, falling back to the
+      // legacy boolean. Default: "off" (no screen) — explicit opt-in only.
+      let screenScope: ScreenScope;
+      if (args.screenScope) {
+        screenScope = args.screenScope;
+      } else if (args.includeScreen === true) {
+        screenScope = "lastTurn";
+      } else {
+        screenScope = "off";
+      }
+      const sub: ThreadEventSubscription = {
+        id,
+        url: args.notifyUrl,
+        headers: args.headers ?? {},
+        states: args.states ?? ["review", "attention"],
+        screenScope,
+        minIntervalMs: args.minIntervalMs ?? 2000,
+        lastFiredAt: new Map(),
+      };
+      subscriptions.set(id, sub);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                subscriptionId: id,
+                notifyUrl: sub.url,
+                states: sub.states,
+                screenScope: sub.screenScope,
+                minIntervalMs: sub.minIntervalMs,
+                activeSubscriptions: subscriptions.size,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "unsubscribe_threads",
+    {
+      description:
+        "Remove a webhook subscription previously registered with `subscribe_threads`. If `subscriptionId` is omitted, removes ALL subscriptions.",
+      inputSchema: {
+        subscriptionId: z
+          .string()
+          .optional()
+          .describe("Subscription id returned by subscribe_threads. Omit to clear all."),
+      },
+    },
+    async (args: { subscriptionId?: string }) => {
+      let removed: number;
+      if (args.subscriptionId) {
+        removed = subscriptions.delete(args.subscriptionId) ? 1 : 0;
+      } else {
+        removed = subscriptions.size;
+        subscriptions.clear();
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              { ok: true, removed, activeSubscriptions: subscriptions.size },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "list_subscriptions",
+    {
+      description: "List active webhook subscriptions registered via `subscribe_threads`.",
+      inputSchema: {},
+    },
+    async () => {
+      const list = Array.from(subscriptions.values()).map((s) => ({
+        subscriptionId: s.id,
+        notifyUrl: s.url,
+        states: s.states,
+        screenScope: s.screenScope,
+        minIntervalMs: s.minIntervalMs,
+      }));
+      return {
+        content: [{ type: "text", text: JSON.stringify({ subscriptions: list }, null, 2) }],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "start_thread",
+    {
+      description:
+        "Create a new dpcode terminal thread that launches a Claude Code or Codex CLI session in the target project — equivalent to the desktop app's \"New Thread → Claude Code / Codex\" button. The thread is created in terminal-cli mode with the project's local workspace; the CLI starts as soon as the terminal is opened. Returns the new threadId so you can immediately drive it with `send_input` / `read_thread` / `wait_for_attention`.",
+      inputSchema: {
+        project: z
+          .string()
+          .describe(
+            "Project to start the thread in. Matches against project title or workspace path (substring).",
+          ),
+        provider: z
+          .enum(["claude", "codex"])
+          .describe('Which CLI to launch. "claude" runs Claude Code, "codex" runs Codex.'),
+        title: z
+          .string()
+          .optional()
+          .describe(
+            'Optional thread title. Defaults to "Claude Code — <project>" or "Codex — <project>".',
+          ),
+        openTerminal: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true (default), also open the terminal session so the CLI actually starts. Set to false to create the thread without spawning the CLI yet.",
+          ),
+      },
+    },
+    async (args: {
+      project: string;
+      provider: "claude" | "codex";
+      title?: string;
+      openTerminal?: boolean;
+    }) => {
+      const project = resolveProject(args.project);
+      const cliKind = args.provider; // "claude" | "codex" — matches TerminalCliKind in contracts
+      const providerKind = cliKind === "claude" ? "claudeAgent" : "codex";
+      const model = DEFAULT_MODEL_BY_PROVIDER[providerKind];
+      const cliLabel = cliKind === "claude" ? "Claude Code" : "Codex";
+      const title = args.title?.trim() || `${cliLabel} — ${project.title}`;
+      const threadId = randomUUID();
+      const createdAt = new Date().toISOString();
+      const dispatched = await ws.dispatchOrchestrationCommand({
+        type: "thread.create",
+        commandId: randomUUID(),
+        threadId,
+        projectId: project.projectId,
+        title,
+        modelSelection: { provider: providerKind, model },
+        runtimeMode: "full-access",
+        interactionMode: "terminal-cli",
+        envMode: "local",
+        branch: null,
+        worktreePath: null,
+        cliKind,
+        createdAt,
+      });
+      let terminal: Awaited<ReturnType<typeof ws.openTerminal>> | null = null;
+      if (args.openTerminal !== false) {
+        terminal = await ws.openTerminal({
+          threadId,
+          cwd: project.workspaceRoot,
+        });
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                threadId,
+                projectId: project.projectId,
+                project: { title: project.title, workspaceRoot: project.workspaceRoot },
+                title,
+                provider: providerKind,
+                cliKind,
+                model,
+                sequence: dispatched.sequence,
+                terminal: terminal
+                  ? {
+                      terminalId: terminal.terminalId,
+                      status: terminal.status,
+                      pid: terminal.pid,
+                    }
+                  : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+} // end registerTools
 
 function parseBind(raw: string): { host: string; port: number } {
   // Accepts "host:port", ":port", or "port". Defaults host to 0.0.0.0.
@@ -333,9 +833,7 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
       const body = await readBody(req);
       await transport.handleRequest(req, res, body);
     } catch (err) {
-      process.stderr.write(
-        `[dpcode-mcp] http error: ${(err as Error).stack ?? err}\n`,
-      );
+      process.stderr.write(`[dpcode-mcp] http error: ${(err as Error).stack ?? err}\n`);
       if (!res.headersSent) {
         res.statusCode = 500;
         res.end("internal error");
