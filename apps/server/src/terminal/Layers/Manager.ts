@@ -66,6 +66,8 @@ const PROVIDER_OUTPUT_ACTIVITY_GRACE_MS = 4_000;
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 const MANAGED_TERMINAL_WRAPPER_DIRNAME = "_managed-bin";
 const MANAGED_TERMINAL_ZSH_DIRNAME = "_managed-zsh";
+// Poll cadence for the managed hook event sink when fs.watch is unavailable.
+const EVENT_SINK_POLL_INTERVAL_MS = 250;
 
 // Bump PTY children above Chromium renderer's oom_score_adj (300) so the
 // kernel sacrifices runaway CLIs (claude/ruby/etc.) instead of the dpcode UI
@@ -1168,6 +1170,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           lastInputAt: null,
           lastOutputAt: null,
           lastOutputSignature: null,
+          eventSinkPath: null,
+          eventSinkWatcher: null,
+          eventSinkOffset: 0,
+          eventSinkBuffer: "",
         };
         this.sessions.set(sessionKey, session);
         this.newlySpawnedFlags.add(sessionKey);
@@ -1318,6 +1324,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           lastOutputSignature: null,
           lastInputAt: null,
           lastOutputAt: null,
+          eventSinkPath: null,
+          eventSinkWatcher: null,
+          eventSinkOffset: 0,
+          eventSinkBuffer: "",
         } satisfies TerminalSessionState;
         this.sessions.set(sessionKey, session);
         this.evictInactiveSessionsIfNeeded();
@@ -1450,6 +1460,28 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.lastOutputSignature = null;
     session.updatedAt = new Date().toISOString();
 
+    // Reset the hook event sink before spawning so the managed hook appends
+    // OSC signals to a clean file. Tailing this file keeps hook signalling
+    // off the PTY data path, where it would interleave with and corrupt the
+    // CLI's TUI frames.
+    session.eventSinkPath = this.managedWrapperBinDir
+      ? this.eventSinkPath(session.threadId, session.terminalId)
+      : null;
+    session.eventSinkOffset = 0;
+    session.eventSinkBuffer = "";
+    if (session.eventSinkPath) {
+      try {
+        fs.writeFileSync(session.eventSinkPath, "");
+      } catch (error) {
+        this.logger.warn("failed to reset terminal event sink", {
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        session.eventSinkPath = null;
+      }
+    }
+
     let ptyProcess: PtyProcess | null = null;
     let startedShell: string | null = null;
     try {
@@ -1458,6 +1490,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         binDir: this.managedWrapperBinDir,
         zshDir: this.managedWrapperZshDir,
       });
+      if (session.eventSinkPath) {
+        terminalEnv.T3CODE_TERMINAL_EVENT_SINK = session.eventSinkPath;
+      }
       let lastSpawnError: unknown = null;
 
       const spawnWithCandidate = (candidate: ShellCandidate) =>
@@ -1527,6 +1562,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       session.unsubscribeExit = ptyProcess.onExit((event) => {
         this.onProcessExit(session, event);
       });
+      this.startEventSinkWatcher(session);
       this.updateSubprocessPollingState();
       this.emitEvent({
         type: eventType,
@@ -1570,34 +1606,56 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
   }
 
+  // Apply a managed hook event (Start/Stop/PermissionRequest) to a session,
+  // emitting an activity event when the derived agent state changes. Shared
+  // by the PTY data path and the event sink watcher.
+  private applyHookEvent(
+    session: TerminalSessionState,
+    hookEvent: TerminalAgentHookEventType,
+  ): void {
+    session.managedAgentObserved = true;
+    const nextManagedAgentRunning = hookEvent !== "Stop";
+    const nextManagedAgentState = agentStateFromHookEvent(hookEvent);
+    if (
+      session.managedAgentRunning !== nextManagedAgentRunning ||
+      session.managedAgentState !== nextManagedAgentState
+    ) {
+      session.managedAgentRunning = nextManagedAgentRunning;
+      session.managedAgentState = nextManagedAgentState;
+      session.hasRunningSubprocess = nextManagedAgentRunning;
+      this.emitActivityEvent(session);
+    }
+  }
+
+  private emitClaudeMetaSignal(
+    session: TerminalSessionState,
+    claudeMeta: ClaudeSessionMetaSignal,
+  ): void {
+    this.emitEvent({
+      type: "claude-session",
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+      createdAt: new Date().toISOString(),
+      sessionId: claudeMeta.sessionId,
+      summary: claudeMeta.summary,
+      cwd: claudeMeta.cwd,
+    });
+  }
+
   private onProcessData(session: TerminalSessionState, data: string): void {
     const sanitized = sanitizeTerminalHistoryChunk(session.pendingHistoryControlSequence, data);
     session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
-    const latestHookEvent = sanitized.hookEvents.at(-1) ?? null;
-    if (latestHookEvent) {
-      session.managedAgentObserved = true;
-      const nextManagedAgentRunning = latestHookEvent !== "Stop";
-      const nextManagedAgentState = agentStateFromHookEvent(latestHookEvent);
-      if (
-        session.managedAgentRunning !== nextManagedAgentRunning ||
-        session.managedAgentState !== nextManagedAgentState
-      ) {
-        session.managedAgentRunning = nextManagedAgentRunning;
-        session.managedAgentState = nextManagedAgentState;
-        session.hasRunningSubprocess = nextManagedAgentRunning;
-        this.emitActivityEvent(session);
+    // When the managed event sink is active, hook OSC signals arrive through
+    // the sink file instead of the PTY stream — ignore any that still leak
+    // into PTY output so we don't double-process them.
+    if (!session.eventSinkPath) {
+      const latestHookEvent = sanitized.hookEvents.at(-1) ?? null;
+      if (latestHookEvent) {
+        this.applyHookEvent(session, latestHookEvent);
       }
-    }
-    for (const claudeMeta of sanitized.claudeMetaSignals) {
-      this.emitEvent({
-        type: "claude-session",
-        threadId: session.threadId,
-        terminalId: session.terminalId,
-        createdAt: new Date().toISOString(),
-        sessionId: claudeMeta.sessionId,
-        summary: claudeMeta.summary,
-        cwd: claudeMeta.cwd,
-      });
+      for (const claudeMeta of sanitized.claudeMetaSignals) {
+        this.emitClaudeMetaSignal(session, claudeMeta);
+      }
     }
     const titleSignalCliKind =
       sanitized.titleSignals
@@ -1736,6 +1794,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.unsubscribeData = null;
     session.unsubscribeExit?.();
     session.unsubscribeExit = null;
+    this.stopEventSinkWatcher(session);
   }
 
   private clearKillEscalationTimer(process: PtyProcess | null): void {
@@ -1960,6 +2019,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const deletions = [
       fs.promises.rm(this.historyPath(threadId, terminalId), { force: true }),
       fs.promises.rm(this.cwdSidecarPath(threadId, terminalId), { force: true }),
+      fs.promises.rm(this.eventSinkPath(threadId, terminalId), { force: true }),
     ];
     if (terminalId === DEFAULT_TERMINAL_ID) {
       deletions.push(fs.promises.rm(this.legacyHistoryPath(threadId), { force: true }));
@@ -2143,6 +2203,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           (name) =>
             name === `${toSafeThreadId(threadId)}.log` ||
             name === `${toSafeThreadId(threadId)}.log.cwd` ||
+            name === `${toSafeThreadId(threadId)}.log.events` ||
             name === `${legacySafeThreadId(threadId)}.log` ||
             name.startsWith(threadPrefix),
         )
@@ -2204,6 +2265,96 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
   private cwdSidecarPath(threadId: string, terminalId: string): string {
     return `${this.historyPath(threadId, terminalId)}.cwd`;
+  }
+
+  private eventSinkPath(threadId: string, terminalId: string): string {
+    return `${this.historyPath(threadId, terminalId)}.events`;
+  }
+
+  // Watch the managed hook event sink file and process appended OSC lines.
+  // The hook appends one OSC sequence per line; we parse each through the
+  // same sanitizer the PTY stream uses so Start/Stop/PermissionRequest and
+  // claude-session signals flow through identical handling.
+  private startEventSinkWatcher(session: TerminalSessionState): void {
+    const sinkPath = session.eventSinkPath;
+    if (!sinkPath) return;
+
+    const drain = () => {
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(sinkPath);
+      } catch {
+        return;
+      }
+      if (stats.size < session.eventSinkOffset) {
+        // File was truncated (session restart) — start over.
+        session.eventSinkOffset = 0;
+        session.eventSinkBuffer = "";
+      }
+      if (stats.size === session.eventSinkOffset) return;
+
+      let chunk = "";
+      try {
+        const fd = fs.openSync(sinkPath, "r");
+        try {
+          const length = stats.size - session.eventSinkOffset;
+          const buffer = Buffer.allocUnsafe(length);
+          const bytesRead = fs.readSync(fd, buffer, 0, length, session.eventSinkOffset);
+          chunk = buffer.toString("utf8", 0, bytesRead);
+          session.eventSinkOffset += bytesRead;
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch (error) {
+        this.logger.warn("failed to read terminal event sink", {
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+
+      session.eventSinkBuffer += chunk;
+      const lastNewline = session.eventSinkBuffer.lastIndexOf("\n");
+      if (lastNewline < 0) return;
+      const complete = session.eventSinkBuffer.slice(0, lastNewline);
+      session.eventSinkBuffer = session.eventSinkBuffer.slice(lastNewline + 1);
+
+      for (const line of complete.split("\n")) {
+        if (line.length === 0) continue;
+        const sanitized = sanitizeTerminalHistoryChunk("", line);
+        const latestHookEvent = sanitized.hookEvents.at(-1) ?? null;
+        if (latestHookEvent) {
+          this.applyHookEvent(session, latestHookEvent);
+        }
+        for (const claudeMeta of sanitized.claudeMetaSignals) {
+          this.emitClaudeMetaSignal(session, claudeMeta);
+        }
+      }
+    };
+
+    try {
+      const watcher = fs.watch(sinkPath, () => drain());
+      session.eventSinkWatcher = () => watcher.close();
+    } catch (error) {
+      // inotify is essentially always available on Linux for a file we just
+      // created, but fall back to a slow poll so hook events still arrive if
+      // fs.watch is somehow unavailable.
+      this.logger.warn("falling back to polling terminal event sink", {
+        threadId: session.threadId,
+        terminalId: session.terminalId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      const interval = setInterval(() => drain(), EVENT_SINK_POLL_INTERVAL_MS);
+      session.eventSinkWatcher = () => clearInterval(interval);
+    }
+    // Catch any lines the hook appended between file reset and watcher start.
+    drain();
+  }
+
+  private stopEventSinkWatcher(session: TerminalSessionState): void {
+    session.eventSinkWatcher?.();
+    session.eventSinkWatcher = null;
   }
 
   private async readPersistedCwd(threadId: string, terminalId: string): Promise<string | null> {

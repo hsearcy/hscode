@@ -118,12 +118,18 @@ fi
 
 _t3code_emit_osc() {
   _t3code_sequence="$1"
-  # The wrapper script captured the PTY device path in T3CODE_TERMINAL_TTY
-  # before exec'ing the CLI. Claude 2.1+ runs hooks detached from /dev/tty,
-  # so this captured path is the only reliable way to push OSC bytes back
-  # onto the PTY where the server's sanitizer can see them. Falling back
-  # to stdout is a last resort — Claude swallows hook stdout, so anything
-  # printed there is invisible to the server.
+  # Primary channel: a side file the server tails (T3CODE_TERMINAL_EVENT_SINK).
+  # Writing OSC bytes straight to the PTY interleaves them with — and corrupts
+  # — the CLI's own TUI frames, because the hook subprocess and the CLI write
+  # to the same PTY slave concurrently. The sink file keeps signalling fully
+  # off the PTY data path. One OSC sequence per line.
+  if [ -n "\${T3CODE_TERMINAL_EVENT_SINK:-}" ]; then
+    printf '%b\\n' "$_t3code_sequence" >> "$T3CODE_TERMINAL_EVENT_SINK" 2>/dev/null && return
+  fi
+  # Fallbacks for unmanaged sessions / older servers that set no sink. The
+  # wrapper captured the PTY device path in T3CODE_TERMINAL_TTY before exec
+  # because Claude 2.1+ runs hooks detached from /dev/tty. Stdout is the last
+  # resort — Claude swallows hook stdout, so the server never sees it.
   if [ -n "\${T3CODE_TERMINAL_TTY:-}" ] && [ -w "$T3CODE_TERMINAL_TTY" ]; then
     printf '%b' "$_t3code_sequence" > "$T3CODE_TERMINAL_TTY" 2>/dev/null && return
   fi

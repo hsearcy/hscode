@@ -88,6 +88,18 @@ export interface TerminalSessionState {
   lastOutputAt: number | null;
   /** Normalized visible output used to ignore redraw-only PTY noise. */
   lastOutputSignature: string | null;
+  /**
+   * Side-channel file the managed hook appends OSC event lines to, kept off
+   * the PTY data path so hook signalling never interleaves with — and
+   * corrupts — the CLI's TUI frames. Null for unmanaged sessions.
+   */
+  eventSinkPath: string | null;
+  /** Disposes the fs.watch handle on the event sink file. */
+  eventSinkWatcher: (() => void) | null;
+  /** Byte offset already consumed from the event sink file. */
+  eventSinkOffset: number;
+  /** Buffered partial line carried between event sink reads. */
+  eventSinkBuffer: string;
 }
 
 export interface ShellCandidate {
