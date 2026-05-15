@@ -6,11 +6,13 @@
 // API (terminal.open / terminal.write + terminal.event push).
 
 import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -74,6 +76,79 @@ const subscriptions = new Map<string, ThreadEventSubscription>();
 const lastStateByThread = new Map<string, string | null>();
 let pushHandlerInstalled = false;
 
+// Subscriptions outlive the MCP process: persist them to disk so a
+// stop/start (e.g. picking up new code) doesn't force every remote client
+// to re-subscribe. Only the durable fields are stored — throttle state
+// (lastFiredAt) and timers are transient and reset on load.
+const SUBSCRIPTIONS_PATH = join(cfg.homeDir, "userdata", "mcp-subscriptions.json");
+
+interface PersistedSubscription {
+  id: string;
+  url: string;
+  headers: Record<string, string>;
+  states: Array<"running" | "attention" | "review">;
+  screenScope: ScreenScope;
+  minIntervalMs: number;
+}
+
+function persistSubscriptions(): void {
+  try {
+    mkdirSync(dirname(SUBSCRIPTIONS_PATH), { recursive: true });
+    const rows: PersistedSubscription[] = Array.from(subscriptions.values()).map((s) => ({
+      id: s.id,
+      url: s.url,
+      headers: s.headers,
+      states: s.states,
+      screenScope: s.screenScope,
+      minIntervalMs: s.minIntervalMs,
+    }));
+    writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(rows, null, 2));
+  } catch (err) {
+    console.error(
+      `[dpcode-mcp] failed to persist subscriptions to ${SUBSCRIPTIONS_PATH}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+function loadSubscriptions(): number {
+  let raw: string;
+  try {
+    raw = readFileSync(SUBSCRIPTIONS_PATH, "utf8");
+  } catch {
+    return 0; // No file yet — first run.
+  }
+  let rows: unknown;
+  try {
+    rows = JSON.parse(raw);
+  } catch {
+    console.error(`[dpcode-mcp] subscriptions file ${SUBSCRIPTIONS_PATH} is corrupt — ignoring.`);
+    return 0;
+  }
+  if (!Array.isArray(rows)) return 0;
+  for (const row of rows as PersistedSubscription[]) {
+    if (!row || typeof row.id !== "string" || typeof row.url !== "string") continue;
+    subscriptions.set(row.id, {
+      id: row.id,
+      url: row.url,
+      headers: row.headers ?? {},
+      states: row.states ?? ["review", "attention"],
+      screenScope: row.screenScope ?? "off",
+      minIntervalMs: typeof row.minIntervalMs === "number" ? row.minIntervalMs : 2000,
+      lastFiredAt: new Map(),
+    });
+  }
+  return subscriptions.size;
+}
+
+// Per-thread pending "attention" debounce. An auto-allowed permission prompt
+// (e.g. tool calls under auto-mode) registers as a transient attention state
+// that flips back to "running" within ~100 ms. We delay forwarding attention
+// transitions so only the ones that actually stick (real prompts the user
+// needs to answer) make it to the webhook.
+const ATTENTION_STABLE_MS = 3000;
+const pendingAttentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 function ensureGlobalPushHandler(): void {
   if (pushHandlerInstalled) return;
   pushHandlerInstalled = true;
@@ -83,11 +158,38 @@ function ensureGlobalPushHandler(): void {
     if (ev.type !== "activity") return;
     const threadId = typeof ev.threadId === "string" ? ev.threadId : null;
     if (!threadId) return;
+    // Workspace-area items have synthetic thread ids like `workspace:<uuid>`
+    // (see apps/web/src/workspaceStore.ts). They share the terminal.event
+    // channel but aren't real conversation threads — skip them.
+    if (threadId.startsWith("workspace:")) return;
     const state = (ev.agentState as string | null | undefined) ?? null;
     const prev = lastStateByThread.get(threadId) ?? null;
     if (state === prev) return; // dedupe non-transitions
     lastStateByThread.set(threadId, state);
+
+    // Always cancel any pending attention timer when state changes — if we
+    // were waiting to forward an attention that flipped to running, the
+    // permission was auto-allowed and we should suppress it.
+    const pending = pendingAttentionTimers.get(threadId);
+    if (pending) {
+      clearTimeout(pending);
+      pendingAttentionTimers.delete(threadId);
+    }
     if (subscriptions.size === 0) return;
+
+    if (state === "attention") {
+      // Defer attention forwarding so transient auto-mode allows don't fire.
+      const evCopy = ev;
+      const timer = setTimeout(() => {
+        pendingAttentionTimers.delete(threadId);
+        // Re-check the current state; only forward if still attention.
+        if (lastStateByThread.get(threadId) === "attention") {
+          void fanOutThreadEvent({ threadId, state: "attention", ev: evCopy });
+        }
+      }, ATTENTION_STABLE_MS);
+      pendingAttentionTimers.set(threadId, timer);
+      return;
+    }
     void fanOutThreadEvent({ threadId, state, ev });
   });
 }
@@ -97,20 +199,20 @@ async function fanOutThreadEvent(input: {
   state: string | null;
   ev: Record<string, unknown>;
 }): Promise<void> {
+  // Look up the thread row once — gives us project/title context for the
+  // payload and the cwd needed to render the screen.
+  const row = db.getThread(input.threadId);
   // Resolve the rendered scrollback once if anyone wants it. We render the
   // full thing here and let each subscriber pick its slice (tail vs lastTurn).
   let renderedText: string | null = null;
   const needsScreen = Array.from(subscriptions.values()).some((s) => s.screenScope !== "off");
-  if (needsScreen) {
+  if (needsScreen && row) {
     try {
-      const row = db.getThread(input.threadId);
-      if (row) {
-        const snap = await ws.openTerminal({
-          threadId: row.threadId,
-          cwd: row.worktreePath ?? row.workspaceRoot,
-        });
-        renderedText = await renderTerminal(snap.history);
-      }
+      const snap = await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      renderedText = await renderTerminal(snap.history);
     } catch {
       // Best-effort.
     }
@@ -133,6 +235,9 @@ async function fanOutThreadEvent(input: {
       const payload: Record<string, unknown> = {
         subscriptionId: sub.id,
         threadId: input.threadId,
+        threadTitle: row?.title ?? null,
+        project: row?.projectTitle ?? null,
+        workspaceRoot: row?.workspaceRoot ?? null,
         agentState: input.state,
         firedAt,
         activity: input.ev,
@@ -467,6 +572,9 @@ function registerTools(server: McpServer): void {
           const state = activity?.agentState ?? null;
           payload = {
             threadId: row.threadId,
+            threadTitle: row.title,
+            project: row.projectTitle,
+            workspaceRoot: row.workspaceRoot,
             agentState: state,
             timedOut: !state || !target.includes(state as "attention" | "review"),
             screen,
@@ -477,6 +585,9 @@ function registerTools(server: McpServer): void {
         } catch (err) {
           payload = {
             threadId: row.threadId,
+            threadTitle: row.title,
+            project: row.projectTitle,
+            workspaceRoot: row.workspaceRoot,
             error: err instanceof Error ? err.message : String(err),
             scheduledAt,
             firedAt: new Date().toISOString(),
@@ -527,7 +638,7 @@ function registerTools(server: McpServer): void {
     "subscribe_threads",
     {
       description:
-        'Register a webhook to receive a POST every time ANY dpcode thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the dpcode server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<last 80 lines, if includeScreen=true>"\n}\n```',
+        'Register a webhook to receive a POST every time ANY dpcode thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the dpcode server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "threadTitle": "<thread title>",\n  "project": "<project name>",\n  "workspaceRoot": "<absolute path>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<assistant turn / tail, if screenScope != off>"\n}\n```',
       inputSchema: {
         notifyUrl: z
           .string()
@@ -598,6 +709,7 @@ function registerTools(server: McpServer): void {
         lastFiredAt: new Map(),
       };
       subscriptions.set(id, sub);
+      persistSubscriptions();
       return {
         content: [
           {
@@ -642,6 +754,7 @@ function registerTools(server: McpServer): void {
         removed = subscriptions.size;
         subscriptions.clear();
       }
+      persistSubscriptions();
       return {
         content: [
           {
@@ -863,6 +976,14 @@ async function main() {
     process.stderr.write(
       `[dpcode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
     );
+  }
+
+  // Restore webhook subscriptions persisted by a prior process so a
+  // stop/start doesn't force remote clients to re-subscribe.
+  const restored = loadSubscriptions();
+  if (restored > 0) {
+    ensureGlobalPushHandler();
+    process.stderr.write(`[dpcode-mcp] restored ${restored} webhook subscription(s)\n`);
   }
 
   const bindRaw = process.env.DPCODE_MCP_BIND;

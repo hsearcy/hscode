@@ -65,6 +65,32 @@ const HORIZONTAL_RULE = /^[\s─━]+$/;
 const INPUT_BOX_LEAD = /^[╭┌]/;
 const INPUT_BOX_TAIL = /^[╰└]/;
 
+// TUI affordance noise — show up scattered through assistant output but carry
+// no semantic content. We strip these line-by-line from extracted turns so a
+// remote subscriber doesn't have to parse around them.
+const NOISE_PATTERNS: RegExp[] = [
+  // "Allowed by auto mode classifier" — auto-permission marker, fires for
+  // every tool call when auto-mode is on. Nothing to act on.
+  /^\s*[└╰]?\s*Allowed by auto mode classifier\s*$/i,
+  // Tool-call meta annotations like "(timeout 5m)", "(retry 2/3)".
+  /^\s*[└╰]?\s*\((timeout|retry|attempt|elapsed|cost)\b[^)]*\)\s*$/i,
+  // "… +24 lines (ctrl+o to expand)" — collapsed output indicator.
+  /^\s*…?\s*\+?\d*\s*(more\s+)?lines?\s*\(ctrl\+o to expand\)\s*$/i,
+  // Bare "(ctrl+o to expand)" tail on otherwise-real output (e.g. "Called slack (ctrl+o to expand)").
+  // Handled below by stripping the suffix in-place rather than dropping the line.
+  // Composer / mode banners that sometimes appear mid-output during redraws.
+  /^\s*(⏵⏵\s*)?auto mode (on|off)\s*\(.*?\)\s*$/i,
+  /^\s*shift\+tab to cycle\s*$/i,
+  /^\s*↑\/↓ for history\s*$/i,
+  /^\s*←\s+for agents\s*$/i,
+  // Stray horizontal rules in the middle of output (composer top/bottom).
+  /^[\s─━]{3,}$/,
+  // Bare box-drawing characters with no content.
+  /^\s*[╭╮╯╰│┃└┘├┤┬┴┼]+\s*$/,
+];
+
+const CTRL_O_SUFFIX = /\s*\((ctrl\+o to expand|view full output)\)\s*$/i;
+
 function stripInputBox(lines: string[]): string[] {
   // Walk from the bottom, dropping the composer box if we see one. Common
   // shapes: (a) `───…\n❯ draft\n───…`, (b) a `╭/╰` boxed variant. Stop at
@@ -134,5 +160,27 @@ export function lastAssistantTurn(text: string, fallbackLines = 80): string {
   // Drop leading blank lines.
   let first = 0;
   while (first < tail.length && tail[first]!.trim() === "") first++;
-  return tail.slice(first).join("\n");
+  return cleanNoise(tail.slice(first)).join("\n");
+}
+
+// Strip TUI affordance noise scattered through extracted assistant output:
+// auto-mode-classifier markers, "ctrl+o to expand" hints, composer banners
+// that leak from cursor-positioning redraws, etc. Collapses runs of resulting
+// blank lines so the output stays readable.
+function cleanNoise(lines: string[]): string[] {
+  const out: string[] = [];
+  let lastBlank = false;
+  for (const raw of lines) {
+    if (NOISE_PATTERNS.some((p) => p.test(raw))) continue;
+    // Strip trailing "(ctrl+o to expand)" without dropping the rest of the
+    // line — preserves info like "Called slack" while removing the affordance.
+    const stripped = raw.replace(CTRL_O_SUFFIX, "");
+    const isBlank = stripped.trim() === "";
+    if (isBlank && lastBlank) continue;
+    out.push(stripped);
+    lastBlank = isBlank;
+  }
+  // Drop trailing blanks.
+  while (out.length > 0 && out[out.length - 1]!.trim() === "") out.pop();
+  return out;
 }
