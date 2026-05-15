@@ -42,7 +42,15 @@ import type {
   TerminalRuntimeViewState,
 } from "./terminalRuntimeTypes";
 
-const ENABLE_TERMINAL_WEBGL = true;
+// xterm's WebGL and Canvas addons have dirty-tracking glitches against
+// rapidly-redrawing TUIs (Claude/Codex's Ink-based status line) when the
+// host is using software-rendered GL — typical in WSL2/Electron. The
+// symptom is duplicated status lines, characters interleaved across cells,
+// and old glyphs showing through new ones; switching threads and back
+// fixes it because that reloads the addon and forces a full repaint from
+// xterm's (correct) buffer. xterm's default DOM renderer is rock-solid for
+// our terminal sizes and the only path that survives these environments.
+const ENABLE_TERMINAL_WEBGL = false;
 const VISUAL_RESIZE_MIN_INTERVAL_MS = 64;
 const BACKEND_RESIZE_DEBOUNCE_MS = 120;
 const WRITE_BATCH_SIZE_LIMIT = 262_144;
