@@ -439,6 +439,11 @@ input {
 .xterm .xterm-viewport {
   scrollbar-width: thin !important;
   scrollbar-color: rgba(0, 0, 0, 0.15) transparent !important;
+  /* Always reserve scrollbar gutter so fit-addon's column count matches the
+     visible viewport width. Without this Electron may use overlay-style
+     scrollbars that report 0px of reserved layout, leaving fit-addon to
+     overcount columns and clipping the rightmost characters under the bar. */
+  scrollbar-gutter: stable !important;
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar,
