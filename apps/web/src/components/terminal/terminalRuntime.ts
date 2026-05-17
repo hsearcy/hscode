@@ -52,7 +52,6 @@ import type {
 // our terminal sizes and the only path that survives these environments.
 const ENABLE_TERMINAL_WEBGL = false;
 const VISUAL_RESIZE_MIN_INTERVAL_MS = 64;
-const BACKEND_RESIZE_DEBOUNCE_MS = 120;
 const WRITE_BATCH_SIZE_LIMIT = 262_144;
 const WRITE_BATCH_MAX_LATENCY_MS = 50;
 
@@ -168,19 +167,20 @@ function flushPendingResize(entry: TerminalRuntimeEntry): void {
 
 function queueBackendResize(entry: TerminalRuntimeEntry, cols: number, rows: number): void {
   const lastSentResize = entry.lastSentResize;
-  const pendingResize = entry.pendingResize;
-  if (
-    (lastSentResize && lastSentResize.cols === cols && lastSentResize.rows === rows) ||
-    (pendingResize && pendingResize.cols === cols && pendingResize.rows === rows)
-  ) {
+  if (lastSentResize && lastSentResize.cols === cols && lastSentResize.rows === rows) {
     return;
   }
-  entry.pendingResize = { cols, rows };
+  // Dispatch immediately. Any debounce here opens a window where xterm
+  // has been resized to the new dimensions but the PTY (and therefore the
+  // inner CLI's view of cols/rows) is still at the old size — Claude
+  // redraws for the old layout while xterm renders at the new one and
+  // the buffer ends up with interleaved frame fragments. The upstream
+  // ResizeObserver path already throttles at VISUAL_RESIZE_MIN_INTERVAL_MS,
+  // and the no-change guard above prevents duplicate sends, so firing
+  // straight through here doesn't spam the backend.
   clearBackendResizeTimer(entry);
-  entry.resizeDispatchTimer = window.setTimeout(() => {
-    entry.resizeDispatchTimer = null;
-    flushPendingResize(entry);
-  }, BACKEND_RESIZE_DEBOUNCE_MS);
+  entry.pendingResize = { cols, rows };
+  flushPendingResize(entry);
 }
 
 function runTerminalResize(
