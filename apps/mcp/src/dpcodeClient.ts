@@ -384,12 +384,19 @@ export class DpcodeWs {
     cols?: number;
     rows?: number;
   }): Promise<TerminalSessionSnapshot> {
+    // Pass cols/rows through ONLY when the caller explicitly provides them.
+    // The server uses input.cols/rows as the target PTY size and resizes the
+    // live PTY when it differs from the existing dimensions. If we sent a
+    // default here, every `send_input` call from MCP would resize a live PTY
+    // to that default, fighting whatever size the web client's fit-addon set
+    // and breaking the inner TUI's rendering. For fresh spawns the server has
+    // its own DEFAULT_OPEN_COLS/ROWS fallback.
     return this.request<TerminalSessionSnapshot>("terminal.open", {
       threadId: input.threadId,
       terminalId: input.terminalId ?? "default",
       cwd: input.cwd,
-      cols: input.cols ?? 120,
-      rows: input.rows ?? 40,
+      ...(input.cols !== undefined ? { cols: input.cols } : {}),
+      ...(input.rows !== undefined ? { rows: input.rows } : {}),
     });
   }
 
