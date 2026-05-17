@@ -10,7 +10,6 @@ import { type TerminalActivityState, type TerminalCliKind } from "@t3tools/share
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
-import { readNativeApi } from "~/nativeApi";
 import {
   MAX_TERMINALS_PER_GROUP,
   type ThreadTerminalGroup,
@@ -23,11 +22,6 @@ import {
   TerminalWorkspaceTabBar,
 } from "./terminal/TerminalChrome";
 import { resolveThreadTerminalLayout } from "./terminal/TerminalLayout";
-import {
-  resolveTerminalSelectionActionPosition,
-  shouldHandleTerminalSelectionMouseUp,
-  terminalSelectionActionDelayForClickCount,
-} from "./terminal/terminalSelectionActions";
 import {
   buildTerminalRuntimeKey,
   terminalRuntimeRegistry,
@@ -55,31 +49,6 @@ function runtimeEnvFromSerialized(
   if (!serializedRuntimeEnv) return undefined;
   const entries = JSON.parse(serializedRuntimeEnv) as Array<[string, string]>;
   return Object.fromEntries(entries);
-}
-
-function getTerminalSelectionRect(mountElement: HTMLElement): DOMRect | null {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-    return null;
-  }
-
-  const range = selection.getRangeAt(0);
-  const commonAncestor = range.commonAncestorContainer;
-  const selectionRoot =
-    commonAncestor instanceof Element ? commonAncestor : commonAncestor.parentElement;
-  if (!(selectionRoot instanceof Element) || !mountElement.contains(selectionRoot)) {
-    return null;
-  }
-
-  const rects = Array.from(range.getClientRects()).filter(
-    (rect) => rect.width > 0 || rect.height > 0,
-  );
-  if (rects.length > 0) {
-    return rects[rects.length - 1] ?? null;
-  }
-
-  const boundingRect = range.getBoundingClientRect();
-  return boundingRect.width > 0 || boundingRect.height > 0 ? boundingRect : null;
 }
 
 interface TerminalViewportProps {
@@ -114,20 +83,13 @@ function TerminalViewport({
   onSessionExited,
   onTerminalMetadataChange,
   onTerminalActivityChange,
-  onAddTerminalContext,
+  onAddTerminalContext: _onAddTerminalContext,
   focusRequestId,
   autoFocus,
   isVisible,
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const onAddTerminalContextRef = useRef(onAddTerminalContext);
-  const terminalLabelRef = useRef(terminalLabel);
-  const selectionPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const selectionGestureActiveRef = useRef(false);
-  const selectionActionRequestIdRef = useRef(0);
-  const selectionActionOpenRef = useRef(false);
-  const selectionActionTimerRef = useRef<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [terminalInstance, setTerminalInstance] = useState<Terminal | null>(null);
   const [searchAddonInstance, setSearchAddonInstance] = useState<SearchAddon | null>(null);
@@ -176,20 +138,12 @@ function TerminalViewport({
   const runtimeViewStateRef = useRef(runtimeViewState);
 
   useEffect(() => {
-    onAddTerminalContextRef.current = onAddTerminalContext;
-  }, [onAddTerminalContext]);
-
-  useEffect(() => {
     runtimeConfigRef.current = runtimeConfig;
   }, [runtimeConfig]);
 
   useEffect(() => {
     runtimeViewStateRef.current = runtimeViewState;
   }, [runtimeViewState]);
-
-  useEffect(() => {
-    terminalLabelRef.current = terminalLabel;
-  }, [terminalLabel]);
 
   useEffect(() => {
     const mount = containerRef.current;
@@ -205,11 +159,6 @@ function TerminalViewport({
     setSearchAddonInstance(attachedRuntime.searchAddon);
 
     return () => {
-      if (selectionActionTimerRef.current !== null) {
-        window.clearTimeout(selectionActionTimerRef.current);
-        selectionActionTimerRef.current = null;
-      }
-      selectionActionOpenRef.current = false;
       terminalRuntimeRegistry.detach(runtimeKey);
       terminalRef.current = null;
       setTerminalInstance(null);
@@ -253,129 +202,10 @@ function TerminalViewport({
     };
   }, []);
 
-  const clearSelectionAction = useCallback(() => {
-    selectionActionRequestIdRef.current += 1;
-    if (selectionActionTimerRef.current !== null) {
-      window.clearTimeout(selectionActionTimerRef.current);
-      selectionActionTimerRef.current = null;
-    }
-  }, []);
-
-  const readSelectionAction = useCallback((): {
-    position: { x: number; y: number };
-    selection: TerminalContextSelection;
-  } | null => {
-    const activeTerminal = terminalRef.current;
-    const mountElement = containerRef.current;
-    if (!activeTerminal || !mountElement || !activeTerminal.hasSelection()) {
-      return null;
-    }
-    const selectionText = activeTerminal.getSelection();
-    const selectionPosition = activeTerminal.getSelectionPosition();
-    const normalizedText = selectionText.replace(/\r\n/g, "\n").replace(/^\n+|\n+$/g, "");
-    if (!selectionPosition || normalizedText.length === 0) {
-      return null;
-    }
-    const lineStart = selectionPosition.start.y + 1;
-    const lineCount = normalizedText.split("\n").length;
-    const lineEnd = Math.max(lineStart, lineStart + lineCount - 1);
-    const bounds = mountElement.getBoundingClientRect();
-    const selectionRect = getTerminalSelectionRect(mountElement);
-    const position = resolveTerminalSelectionActionPosition({
-      bounds,
-      selectionRect:
-        selectionRect === null
-          ? null
-          : { right: selectionRect.right, bottom: selectionRect.bottom },
-      pointer: selectionPointerRef.current,
-    });
-    return {
-      position,
-      selection: {
-        terminalId,
-        terminalLabel: terminalLabelRef.current,
-        lineStart,
-        lineEnd,
-        text: normalizedText,
-      },
-    };
-  }, [terminalId]);
-
-  const showSelectionAction = useCallback(async () => {
-    if (selectionActionOpenRef.current) {
-      return;
-    }
-    const nextAction = readSelectionAction();
-    if (!nextAction) {
-      clearSelectionAction();
-      return;
-    }
-    const api = readNativeApi();
-    if (!api) return;
-    const requestId = ++selectionActionRequestIdRef.current;
-    selectionActionOpenRef.current = true;
-    try {
-      const clicked = await api.contextMenu.show(
-        [{ id: "add-to-chat", label: "Add to chat" }],
-        nextAction.position,
-      );
-      if (requestId !== selectionActionRequestIdRef.current || clicked !== "add-to-chat") {
-        return;
-      }
-      onAddTerminalContextRef.current(nextAction.selection);
-      terminalRef.current?.clearSelection();
-      terminalRuntimeRegistry.focus(runtimeKey);
-    } finally {
-      selectionActionOpenRef.current = false;
-    }
-  }, [clearSelectionAction, readSelectionAction, runtimeKey]);
-
-  useEffect(() => {
-    const terminal = terminalInstance;
-    const mount = containerRef.current;
-    if (!terminal || !mount) return;
-
-    const selectionDisposable = terminal.onSelectionChange(() => {
-      if (terminal.hasSelection()) {
-        return;
-      }
-      clearSelectionAction();
-    });
-
-    const handleMouseUp = (event: MouseEvent) => {
-      const shouldHandle = shouldHandleTerminalSelectionMouseUp(
-        selectionGestureActiveRef.current,
-        event.button,
-      );
-      selectionGestureActiveRef.current = false;
-      if (!shouldHandle) {
-        return;
-      }
-      selectionPointerRef.current = { x: event.clientX, y: event.clientY };
-      const delay = terminalSelectionActionDelayForClickCount(event.detail);
-      selectionActionTimerRef.current = window.setTimeout(() => {
-        selectionActionTimerRef.current = null;
-        window.requestAnimationFrame(() => {
-          void showSelectionAction();
-        });
-      }, delay);
-    };
-
-    const handlePointerDown = (event: PointerEvent) => {
-      clearSelectionAction();
-      selectionGestureActiveRef.current = event.button === 0;
-    };
-
-    window.addEventListener("mouseup", handleMouseUp);
-    mount.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      selectionDisposable.dispose();
-      window.removeEventListener("mouseup", handleMouseUp);
-      mount.removeEventListener("pointerdown", handlePointerDown);
-      clearSelectionAction();
-      selectionGestureActiveRef.current = false;
-    };
-  }, [clearSelectionAction, showSelectionAction, terminalInstance]);
+  // The auto "Add to chat" popup that used to appear on every text selection
+  // was removed — it interrupted plain copy-paste, which is what selection is
+  // for 99% of the time. onAddTerminalContext stays wired so a future
+  // explicit affordance (right-click menu, keybind) can resurface it.
 
   return (
     <div className="h-full min-h-0 w-full bg-background p-3">
