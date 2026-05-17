@@ -2,7 +2,7 @@ import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ThreadId, type TurnId } from "@t3tools/contracts";
+import { ThreadId, TurnId } from "@t3tools/contracts";
 import { FaPlusMinus } from "react-icons/fa6";
 import { LuWrapText } from "react-icons/lu";
 import {
@@ -13,6 +13,7 @@ import {
   Columns2Icon,
   CopyIcon,
   DiffIcon,
+  RefreshCwIcon,
   Rows3Icon,
   TextWrapIcon,
   XIcon,
@@ -26,11 +27,13 @@ import {
   useState,
 } from "react";
 import {
+  gitBranchCommitsQueryOptions,
   gitBranchesQueryOptions,
+  gitCommitDiffQueryOptions,
   gitSummarizeDiffQueryOptions,
   gitWorkingTreeDiffQueryOptions,
+  invalidateGitQueries,
 } from "~/lib/gitReactQuery";
-import { checkpointDiffQueryOptions } from "~/lib/providerReactQuery";
 import { cn } from "~/lib/utils";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import { useTheme } from "../hooks/useTheme";
@@ -41,7 +44,6 @@ import {
 } from "../lib/diffRendering";
 import { resolveDiffEnvironmentState } from "../lib/threadEnvironment";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
-import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useStore } from "../store";
 import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
 import { createProjectSelector, createThreadSelector } from "../storeSelectors";
@@ -296,109 +298,92 @@ export default function DiffPanel({
   const activeCwd = diffEnvironmentState.cwd;
   const gitBranchesQuery = useQuery(gitBranchesQueryOptions(activeCwd ?? null));
   const isGitRepo = gitBranchesQuery.data?.isRepo ?? true;
-  const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
-    useTurnDiffSummaries(activeThread);
-  const orderedTurnDiffSummaries = useMemo(
-    () =>
-      [...turnDiffSummaries].toSorted((left, right) => {
-        const leftTurnCount =
-          left.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[left.turnId] ?? 0;
-        const rightTurnCount =
-          right.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[right.turnId] ?? 0;
-        if (leftTurnCount !== rightTurnCount) {
-          return rightTurnCount - leftTurnCount;
-        }
-        return right.completedAt.localeCompare(left.completedAt);
-      }),
-    [inferredCheckpointTurnCountByTurnId, turnDiffSummaries],
-  );
 
-  const selectedTurnId = panelState
+  // If the active cwd was inherited from a stale claude-reported worktree
+  // (e.g. Claude moved out of an ad-hoc worktree that has since been removed)
+  // git will report this path is not a repo. Clear the override so cwd
+  // resolution falls back to the thread's stored worktree / project root.
+  const clearClaudeReportedCwd = useClaudeSessionMetaStore((store) => store.setThreadCwd);
+  useEffect(() => {
+    if (
+      activeThreadId &&
+      claudeReportedCwdIsOutsideProject &&
+      claudeReportedCwd !== null &&
+      gitBranchesQuery.data?.isRepo === false
+    ) {
+      clearClaudeReportedCwd(activeThreadId, null);
+    }
+  }, [
+    activeThreadId,
+    claudeReportedCwd,
+    claudeReportedCwdIsOutsideProject,
+    clearClaudeReportedCwd,
+    gitBranchesQuery.data?.isRepo,
+  ]);
+
+  const refreshDiffPanel = useCallback(() => {
+    if (activeThreadId && claudeReportedCwdIsOutsideProject) {
+      clearClaudeReportedCwd(activeThreadId, null);
+    }
+    void invalidateGitQueries(queryClient);
+  }, [activeThreadId, claudeReportedCwdIsOutsideProject, clearClaudeReportedCwd, queryClient]);
+
+  const branchCommitsQuery = useQuery(
+    gitBranchCommitsQueryOptions({
+      cwd: activeCwd ?? null,
+      enabled: diffOpen && isGitRepo && !diffEnvironmentPending,
+    }),
+  );
+  const branchCommits = useMemo(
+    () => branchCommitsQuery.data?.commits ?? [],
+    [branchCommitsQuery.data?.commits],
+  );
+  const rangePatch = branchCommitsQuery.data?.rangePatch ?? "";
+
+  // The route/state field is named diffTurnId for historical reasons; the
+  // panel now stores a commit sha in that slot. Legacy turn ids that no
+  // longer correspond to a commit naturally fall through to "All commits".
+  const rawSelectionId = panelState
     ? (panelState.diffTurnId ?? null)
     : (diffSearch.diffTurnId ?? null);
+  const selectedCommitSha =
+    rawSelectionId && branchCommits.some((commit) => commit.sha === rawSelectionId)
+      ? rawSelectionId
+      : null;
+  const selectedCommit = selectedCommitSha
+    ? branchCommits.find((commit) => commit.sha === selectedCommitSha)
+    : undefined;
   const selectedFilePath =
-    selectedTurnId !== null
+    selectedCommitSha !== null
       ? panelState
         ? (panelState.diffFilePath ?? null)
         : (diffSearch.diffFilePath ?? null)
       : null;
-  const selectedTurn =
-    selectedTurnId === null
-      ? undefined
-      : (orderedTurnDiffSummaries.find((summary) => summary.turnId === selectedTurnId) ??
-        orderedTurnDiffSummaries[0]);
-  const selectedCheckpointTurnCount =
-    selectedTurn &&
-    (selectedTurn.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[selectedTurn.turnId]);
-  const selectedCheckpointRange = useMemo(
-    () =>
-      typeof selectedCheckpointTurnCount === "number"
-        ? {
-            fromTurnCount: Math.max(0, selectedCheckpointTurnCount - 1),
-            toTurnCount: selectedCheckpointTurnCount,
-          }
-        : null,
-    [selectedCheckpointTurnCount],
-  );
-  const conversationCheckpointTurnCount = useMemo(() => {
-    const turnCounts = orderedTurnDiffSummaries
-      .map(
-        (summary) =>
-          summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId],
-      )
-      .filter((value): value is number => typeof value === "number");
-    if (turnCounts.length === 0) {
-      return undefined;
-    }
-    const latest = Math.max(...turnCounts);
-    return latest > 0 ? latest : undefined;
-  }, [inferredCheckpointTurnCountByTurnId, orderedTurnDiffSummaries]);
-  const conversationCheckpointRange = useMemo(
-    () =>
-      !selectedTurn && typeof conversationCheckpointTurnCount === "number"
-        ? {
-            fromTurnCount: 0,
-            toTurnCount: conversationCheckpointTurnCount,
-          }
-        : null,
-    [conversationCheckpointTurnCount, selectedTurn],
-  );
-  const activeCheckpointRange = selectedTurn
-    ? selectedCheckpointRange
-    : conversationCheckpointRange;
-  const conversationCacheScope = useMemo(() => {
-    if (selectedTurn || orderedTurnDiffSummaries.length === 0) {
-      return null;
-    }
-    return `conversation:${orderedTurnDiffSummaries.map((summary) => summary.turnId).join(",")}`;
-  }, [orderedTurnDiffSummaries, selectedTurn]);
-  const activeCheckpointDiffQuery = useQuery(
-    checkpointDiffQueryOptions({
-      threadId: activeThreadId,
-      fromTurnCount: activeCheckpointRange?.fromTurnCount ?? null,
-      toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
-      cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
-      enabled: isGitRepo && !diffEnvironmentPending,
+
+  const commitDiffQuery = useQuery(
+    gitCommitDiffQueryOptions({
+      cwd: activeCwd ?? null,
+      sha: selectedCommitSha,
+      enabled: diffOpen && isGitRepo && !diffEnvironmentPending && selectedCommitSha !== null,
     }),
   );
-  const selectedTurnCheckpointDiff = selectedTurn
-    ? activeCheckpointDiffQuery.data?.diff
-    : undefined;
-  const conversationCheckpointDiff = selectedTurn
-    ? undefined
-    : activeCheckpointDiffQuery.data?.diff;
-  const isLoadingCheckpointDiff = activeCheckpointDiffQuery.isLoading;
-  const checkpointDiffError =
-    activeCheckpointDiffQuery.error instanceof Error
-      ? activeCheckpointDiffQuery.error.message
-      : activeCheckpointDiffQuery.error
-        ? "Failed to load checkpoint diff."
-        : null;
-
-  const selectedPatch = selectedTurn ? selectedTurnCheckpointDiff : conversationCheckpointDiff;
+  const selectedPatch = selectedCommitSha ? commitDiffQuery.data?.patch : rangePatch;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
   const normalizedSelectedPatch = hasResolvedPatch ? selectedPatch.trim() : null;
+  const reviewIsLoading = selectedCommitSha
+    ? commitDiffQuery.isLoading
+    : branchCommitsQuery.isLoading;
+  const reviewError =
+    selectedCommitSha && commitDiffQuery.error
+      ? commitDiffQuery.error instanceof Error
+        ? commitDiffQuery.error.message
+        : "Failed to load commit diff."
+      : !selectedCommitSha && branchCommitsQuery.error
+        ? branchCommitsQuery.error instanceof Error
+          ? branchCommitsQuery.error.message
+          : "Failed to load branch commits."
+        : null;
   const workingTreeDiffQuery = useQuery(
     gitWorkingTreeDiffQueryOptions({
       cwd: activeCwd ?? null,
@@ -417,9 +402,9 @@ export default function DiffPanel({
         ? "Failed to load total working tree diff."
         : null;
   const activeReviewPatch = surfaceMode === "total" ? workingTreePatch : selectedPatch;
-  const activeReviewError = surfaceMode === "total" ? workingTreeDiffError : checkpointDiffError;
+  const activeReviewError = surfaceMode === "total" ? workingTreeDiffError : reviewError;
   const activeReviewIsLoading =
-    surfaceMode === "total" ? workingTreeDiffQuery.isLoading : isLoadingCheckpointDiff;
+    surfaceMode === "total" ? workingTreeDiffQuery.isLoading : reviewIsLoading;
   const activeReviewHasNoChanges =
     surfaceMode === "total" ? hasNoWorkingTreeChanges : hasNoNetChanges;
   const isSidebarMode = mode === "sidebar";
@@ -476,7 +461,7 @@ export default function DiffPanel({
 
   useEffect(() => {
     setSurfaceMode("review");
-  }, [activeThreadId, diffOpen, selectedPatchIdentity, selectedTurnId]);
+  }, [activeThreadId, diffOpen, selectedPatchIdentity, selectedCommitSha]);
 
   const diffSummaryPrefetchOptions = useMemo(
     () =>
@@ -586,12 +571,13 @@ export default function DiffPanel({
     });
   }, []);
 
-  const selectTurn = (turnId: TurnId) => {
+  const selectCommit = (sha: string) => {
     if (!activeThread) return;
+    const brandedSha = TurnId.makeUnsafe(sha);
     if (onUpdatePanelState) {
       onUpdatePanelState({
         panel: "diff",
-        diffTurnId: turnId,
+        diffTurnId: brandedSha,
         diffFilePath: null,
       });
       return;
@@ -601,11 +587,11 @@ export default function DiffPanel({
       params: { threadId: activeThread.id },
       search: (previous) => {
         const rest = stripDiffSearchParams(previous);
-        return { ...rest, panel: "diff", diff: "1", diffTurnId: turnId };
+        return { ...rest, panel: "diff", diff: "1", diffTurnId: brandedSha };
       },
     });
   };
-  const selectWholeConversation = () => {
+  const selectAllCommits = () => {
     if (!activeThread) return;
     if (onUpdatePanelState) {
       onUpdatePanelState({
@@ -675,7 +661,7 @@ export default function DiffPanel({
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [orderedTurnDiffSummaries, selectedTurnId, updateTurnStripScrollState]);
+  }, [branchCommits, selectedCommitSha, updateTurnStripScrollState]);
 
   useEffect(() => {
     const element = turnStripRef.current;
@@ -683,7 +669,7 @@ export default function DiffPanel({
 
     const selectedChip = element.querySelector<HTMLElement>("[data-turn-chip-selected='true']");
     selectedChip?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
-  }, [selectedTurn?.turnId, selectedTurnId]);
+  }, [selectedCommitSha]);
 
   const headerRow = (
     <>
@@ -730,46 +716,46 @@ export default function DiffPanel({
           <button
             type="button"
             className="shrink-0 rounded-md"
-            onClick={selectWholeConversation}
-            data-turn-chip-selected={selectedTurnId === null}
+            onClick={selectAllCommits}
+            data-turn-chip-selected={selectedCommitSha === null}
           >
             <div
               className={cn(
                 "rounded-md border px-2 py-1 text-left transition-colors",
-                selectedTurnId === null
+                selectedCommitSha === null
                   ? "border-[color:var(--color-border)] bg-[var(--color-text-foreground)] text-[var(--color-background-surface)]"
                   : "border-[color:var(--color-border-light)] bg-transparent text-[var(--color-text-foreground-secondary)] hover:border-[color:var(--color-border)] hover:bg-[var(--sidebar-accent)] hover:text-[var(--color-text-foreground)]",
               )}
             >
-              <div className="text-[10px] leading-tight font-medium">All turns</div>
+              <div className="text-[10px] leading-tight font-medium">All commits</div>
             </div>
           </button>
-          {orderedTurnDiffSummaries.map((summary) => (
+          {branchCommits.map((commit) => (
             <button
-              key={summary.turnId}
+              key={commit.sha}
               type="button"
               className="shrink-0 rounded-md"
-              onClick={() => selectTurn(summary.turnId)}
-              title={summary.turnId}
-              data-turn-chip-selected={summary.turnId === selectedTurn?.turnId}
+              onClick={() => selectCommit(commit.sha)}
+              title={`${commit.shortSha} · ${commit.subject}`}
+              data-turn-chip-selected={commit.sha === selectedCommit?.sha}
             >
               <div
                 className={cn(
                   "rounded-md border px-2 py-1 text-left transition-colors",
-                  summary.turnId === selectedTurn?.turnId
+                  commit.sha === selectedCommit?.sha
                     ? "border-[color:var(--color-border)] bg-[var(--color-text-foreground)] text-[var(--color-background-surface)]"
                     : "border-[color:var(--color-border-light)] bg-transparent text-[var(--color-text-foreground-secondary)] hover:border-[color:var(--color-border)] hover:bg-[var(--sidebar-accent)] hover:text-[var(--color-text-foreground)]",
                 )}
               >
                 <div className="flex items-center gap-1">
-                  <span className="text-[10px] leading-tight font-medium">
-                    Turn{" "}
-                    {summary.checkpointTurnCount ??
-                      inferredCheckpointTurnCountByTurnId[summary.turnId] ??
-                      "?"}
+                  <span className="font-mono text-[10px] leading-tight font-medium">
+                    {commit.shortSha}
+                  </span>
+                  <span className="max-w-[14ch] truncate text-[10px] leading-tight opacity-80">
+                    {commit.subject}
                   </span>
                   <span className="text-[9px] leading-tight opacity-70">
-                    {formatShortTimestamp(summary.completedAt, settings.timestampFormat)}
+                    {formatShortTimestamp(commit.authorDate, settings.timestampFormat)}
                   </span>
                 </div>
               </div>
@@ -813,6 +799,18 @@ export default function DiffPanel({
             </Toggle>
           </>
         ) : null}
+        <button
+          type="button"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--color-text-foreground-secondary)] transition-colors hover:bg-[var(--sidebar-accent)] hover:text-[var(--color-text-foreground)] [-webkit-app-region:no-drag]"
+          onClick={(event) => {
+            event.stopPropagation();
+            refreshDiffPanel();
+          }}
+          aria-label="Refresh diff panel"
+          title="Refresh diff (re-detect worktree, reload commits)"
+        >
+          <RefreshCwIcon className="size-3.5" />
+        </button>
         {onClosePanel ? (
           <button
             type="button"
@@ -834,11 +832,11 @@ export default function DiffPanel({
     <DiffPanelShell mode={mode} header={headerRow}>
       {!activeThread ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          Select a thread to inspect turn diffs.
+          Select a thread to inspect branch diffs.
         </div>
       ) : !isGitRepo ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          Turn diffs are unavailable because this project is not a git repository.
+          Branch diffs are unavailable because this project is not a git repository.
         </div>
       ) : diffEnvironmentPending ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
@@ -999,7 +997,9 @@ export default function DiffPanel({
                     label={
                       surfaceMode === "total"
                         ? "Loading total working tree diff..."
-                        : "Loading checkpoint diff..."
+                        : selectedCommitSha
+                          ? "Loading commit diff..."
+                          : "Loading branch commits..."
                     }
                   />
                 ) : (
@@ -1008,7 +1008,9 @@ export default function DiffPanel({
                       {activeReviewHasNoChanges
                         ? surfaceMode === "total"
                           ? "No uncommitted repo changes in this worktree."
-                          : "No net changes in this selection."
+                          : selectedCommitSha
+                            ? "This commit has no changes."
+                            : "No commits on this branch yet. Use the Total tab to see uncommitted changes."
                         : surfaceMode === "total"
                           ? "No total repo diff is available right now."
                           : "No patch available for this selection."}

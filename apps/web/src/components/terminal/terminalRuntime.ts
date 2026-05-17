@@ -6,8 +6,8 @@ import { CanvasAddon } from "@xterm/addon-canvas";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { ImageAddon } from "@xterm/addon-image";
-import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { SearchAddon } from "@xterm/addon-search";
+import { LigaturesAddon } from "@xterm/addon-ligatures";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import {
@@ -42,15 +42,15 @@ import type {
   TerminalRuntimeViewState,
 } from "./terminalRuntimeTypes";
 
-// xterm's WebGL and Canvas addons have dirty-tracking glitches against
-// rapidly-redrawing TUIs (Claude/Codex's Ink-based status line) when the
-// host is using software-rendered GL — typical in WSL2/Electron. The
-// symptom is duplicated status lines, characters interleaved across cells,
-// and old glyphs showing through new ones; switching threads and back
-// fixes it because that reloads the addon and forces a full repaint from
-// xterm's (correct) buffer. xterm's default DOM renderer is rock-solid for
-// our terminal sizes and the only path that survives these environments.
-const ENABLE_TERMINAL_WEBGL = false;
+// The DOM renderer has its own problems — selection paints
+// off-by-one against word boundaries (the first character of a selected
+// run vanishes both visually and in the clipboard) and doesn't avoid the
+// rightmost-column clipping we tried to fix with scrollbar-gutter. WebGL/
+// Canvas were dropped previously to chase Ink-based TUI redraw artifacts,
+// but that swap didn't fix the original artifacts either, so we're back to
+// the cell-based renderers and will address the TUI artifacts at the source
+// (write batching / refresh scheduling) instead of by changing renderer.
+const ENABLE_TERMINAL_WEBGL = true;
 const VISUAL_RESIZE_MIN_INTERVAL_MS = 64;
 const WRITE_BATCH_SIZE_LIMIT = 262_144;
 const WRITE_BATCH_MAX_LATENCY_MS = 50;

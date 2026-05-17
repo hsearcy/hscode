@@ -9,11 +9,16 @@ const GIT_BRANCHES_STALE_TIME_MS = 15_000;
 const GIT_BRANCHES_REFETCH_INTERVAL_MS = 60_000;
 const GIT_DIFF_SUMMARY_GC_TIME_MS = 30 * 60_000;
 const GIT_WORKING_TREE_DIFF_STALE_TIME_MS = 5_000;
+const GIT_BRANCH_COMMITS_STALE_TIME_MS = 5_000;
+const GIT_COMMIT_DIFF_STALE_TIME_MS = 5 * 60_000;
+const GIT_COMMIT_DIFF_GC_TIME_MS = 30 * 60_000;
 
 export const gitQueryKeys = {
   all: ["git"] as const,
   status: (cwd: string | null) => ["git", "status", cwd] as const,
   branches: (cwd: string | null) => ["git", "branches", cwd] as const,
+  branchCommits: (cwd: string | null) => ["git", "branch-commits", cwd] as const,
+  commitDiff: (cwd: string | null, sha: string | null) => ["git", "commit-diff", cwd, sha] as const,
   workingTreeDiff: (cwd: string | null) => ["git", "working-tree-diff", cwd] as const,
   diffSummary: (
     cacheScope: string | null,
@@ -47,6 +52,8 @@ export function invalidateGitQueries(queryClient: QueryClient) {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["git", "status"] as const }),
     queryClient.invalidateQueries({ queryKey: ["git", "branches"] as const }),
+    queryClient.invalidateQueries({ queryKey: ["git", "branch-commits"] as const }),
+    queryClient.invalidateQueries({ queryKey: ["git", "commit-diff"] as const }),
     queryClient.invalidateQueries({ queryKey: ["git", "working-tree-diff"] as const }),
     queryClient.invalidateQueries({ queryKey: ["git", "pull-request"] as const }),
   ]);
@@ -99,6 +106,45 @@ export function gitResolvePullRequestQueryOptions(input: {
     },
     enabled: input.cwd !== null && input.reference !== null,
     staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+export function gitBranchCommitsQueryOptions(input: { cwd: string | null; enabled?: boolean }) {
+  return queryOptions({
+    queryKey: gitQueryKeys.branchCommits(input.cwd),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd) {
+        throw new Error("Branch commits are unavailable.");
+      }
+      return api.git.listBranchCommits({ cwd: input.cwd });
+    },
+    enabled: (input.enabled ?? true) && input.cwd !== null,
+    staleTime: GIT_BRANCH_COMMITS_STALE_TIME_MS,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+  });
+}
+
+export function gitCommitDiffQueryOptions(input: {
+  cwd: string | null;
+  sha: string | null;
+  enabled?: boolean;
+}) {
+  return queryOptions({
+    queryKey: gitQueryKeys.commitDiff(input.cwd, input.sha),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd || !input.sha) {
+        throw new Error("Commit diff is unavailable.");
+      }
+      return api.git.showCommit({ cwd: input.cwd, sha: input.sha });
+    },
+    enabled: (input.enabled ?? true) && input.cwd !== null && input.sha !== null,
+    staleTime: GIT_COMMIT_DIFF_STALE_TIME_MS,
+    gcTime: GIT_COMMIT_DIFF_GC_TIME_MS,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });

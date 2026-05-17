@@ -75,6 +75,7 @@ import { resolvePathLinkTarget } from "~/terminal-links";
 import { readNativeApi } from "~/nativeApi";
 import { createThreadSelector } from "~/storeSelectors";
 import { useStore } from "~/store";
+import { useClaudeSessionMetaStore } from "~/claudeSessionMetaStore";
 
 interface GitActionsControlProps {
   gitCwd: string | null;
@@ -322,6 +323,30 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
   const { data: branchList = null } = useQuery(gitBranchesQueryOptions(gitCwd));
   // Default to true while loading so we don't flash init controls.
   const isRepo = branchList?.isRepo ?? true;
+  // If git reports the active cwd is not a repo and that cwd was inherited
+  // from a stale claude-reported worktree (e.g. an ad-hoc worktree Claude
+  // created and later removed), clear that override so the next render
+  // resolves back to the thread's stored worktree / project root.
+  const claudeReportedCwdForThread = useClaudeSessionMetaStore((store) =>
+    activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
+  );
+  const clearClaudeReportedCwd = useClaudeSessionMetaStore((store) => store.setThreadCwd);
+  useEffect(() => {
+    if (
+      activeThreadId &&
+      branchList?.isRepo === false &&
+      claudeReportedCwdForThread !== null &&
+      claudeReportedCwdForThread === gitCwd
+    ) {
+      clearClaudeReportedCwd(activeThreadId, null);
+    }
+  }, [
+    activeThreadId,
+    branchList?.isRepo,
+    claudeReportedCwdForThread,
+    clearClaudeReportedCwd,
+    gitCwd,
+  ]);
   const hasOriginRemote = branchList?.hasOriginRemote ?? false;
   const currentBranch = branchList?.branches.find((branch) => branch.current)?.name ?? null;
   const liveThreadBranchUpdate = useMemo(

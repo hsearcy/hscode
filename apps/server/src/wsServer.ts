@@ -2348,6 +2348,16 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return yield* git.listBranches(body);
       }
 
+      case WS_METHODS.gitListBranchCommits: {
+        const body = stripRequestTag(request.body);
+        return yield* git.listBranchCommits(body);
+      }
+
+      case WS_METHODS.gitShowCommit: {
+        const body = stripRequestTag(request.body);
+        return yield* git.showCommit(body);
+      }
+
       case WS_METHODS.gitCreateWorktree: {
         const body = stripRequestTag(request.body);
         return yield* git.createWorktree(body);

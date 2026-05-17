@@ -1850,6 +1850,113 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         return { branches, isRepo: true, hasOriginRemote: remoteNames.includes("origin") };
       });
 
+    const BRANCH_COMMITS_LIMIT = 500;
+    const BRANCH_COMMITS_FIELD_SEP = "\x1f";
+    const BRANCH_COMMITS_RECORD_SEP = "\x1e";
+    const BRANCH_COMMITS_FORMAT = `tformat:%H${BRANCH_COMMITS_FIELD_SEP}%h${BRANCH_COMMITS_FIELD_SEP}%aI${BRANCH_COMMITS_FIELD_SEP}%an${BRANCH_COMMITS_FIELD_SEP}%s${BRANCH_COMMITS_RECORD_SEP}`;
+
+    const listBranchCommits: GitCoreShape["listBranchCommits"] = (input) =>
+      Effect.gen(function* () {
+        const branchResult = yield* executeGit(
+          "GitCore.listBranchCommits.branch",
+          input.cwd,
+          ["symbolic-ref", "--short", "--quiet", "HEAD"],
+          { allowNonZeroExit: true },
+        );
+        const branch = branchResult.code === 0 ? branchResult.stdout.trim() || null : null;
+
+        const baseOid = yield* resolveBaseMergeBase(input.cwd).pipe(
+          Effect.catch(() => Effect.succeed(null)),
+        );
+
+        const headExists = yield* executeGit(
+          "GitCore.listBranchCommits.headExists",
+          input.cwd,
+          ["rev-parse", "--verify", "HEAD"],
+          { allowNonZeroExit: true },
+        ).pipe(Effect.map((result) => result.code === 0));
+
+        if (!headExists) {
+          return {
+            branch,
+            baseRef: baseOid,
+            commits: [],
+            rangePatch: "",
+          };
+        }
+
+        const rangeArg = baseOid ? `${baseOid}..HEAD` : "HEAD";
+        const logResult = yield* executeGit(
+          "GitCore.listBranchCommits.log",
+          input.cwd,
+          [
+            "log",
+            `--max-count=${BRANCH_COMMITS_LIMIT}`,
+            `--format=${BRANCH_COMMITS_FORMAT}`,
+            rangeArg,
+          ],
+          { allowNonZeroExit: true },
+        );
+
+        if (logResult.code !== 0) {
+          return {
+            branch,
+            baseRef: baseOid,
+            commits: [],
+            rangePatch: "",
+          };
+        }
+
+        const commits = logResult.stdout
+          .split(BRANCH_COMMITS_RECORD_SEP)
+          .map((record) => record.replace(/^\n/, ""))
+          .filter((record) => record.length > 0)
+          .map((record) => {
+            const [sha, shortSha, authorDate, authorName, ...subjectParts] =
+              record.split(BRANCH_COMMITS_FIELD_SEP);
+            return {
+              sha: sha ?? "",
+              shortSha: shortSha ?? "",
+              authorDate: authorDate ?? "",
+              authorName: authorName ?? "",
+              subject: subjectParts.join(BRANCH_COMMITS_FIELD_SEP),
+            };
+          })
+          .filter((commit) => commit.sha.length > 0 && commit.shortSha.length > 0);
+
+        const rangePatch = baseOid
+          ? yield* execute({
+              operation: "GitCore.listBranchCommits.rangePatch",
+              cwd: input.cwd,
+              args: ["diff", "--patch", "--no-color", "--no-ext-diff", `${baseOid}..HEAD`],
+              maxOutputBytes: 10_000_000,
+              allowNonZeroExit: true,
+            }).pipe(Effect.map((result) => result.stdout))
+          : "";
+
+        return {
+          branch,
+          baseRef: baseOid,
+          commits,
+          rangePatch,
+        };
+      });
+
+    const showCommit: GitCoreShape["showCommit"] = (input) =>
+      Effect.gen(function* () {
+        const result = yield* execute({
+          operation: "GitCore.showCommit",
+          cwd: input.cwd,
+          args: ["show", "--patch", "--no-color", "--no-ext-diff", "--format=", input.sha],
+          maxOutputBytes: 10_000_000,
+          allowNonZeroExit: true,
+        });
+        return {
+          sha: input.sha,
+          patch: result.stdout,
+        };
+      });
+
     const createWorktree: GitCoreShape["createWorktree"] = (input) =>
       Effect.gen(function* () {
         const targetBranch = input.newBranch ?? input.branch;
@@ -2347,6 +2454,8 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
       readRangeContext,
       readConfigValue,
       listBranches,
+      listBranchCommits,
+      showCommit,
       createWorktree,
       createDetachedWorktree,
       fetchPullRequestBranch,

@@ -16,8 +16,12 @@ import type {
   GitCreateWorktreeInput,
   GitCreateWorktreeResult,
   GitInitInput,
+  GitListBranchCommitsInput,
+  GitListBranchCommitsResult,
   GitListBranchesInput,
   GitListBranchesResult,
+  GitShowCommitInput,
+  GitShowCommitResult,
   GitPullResult,
   GitRemoveIndexLockInput,
   GitRemoveWorktreeInput,
@@ -218,6 +222,22 @@ export interface GitCoreShape {
   readonly listBranches: (
     input: GitListBranchesInput,
   ) => Effect.Effect<GitListBranchesResult, GitCommandError>;
+
+  /**
+   * List commits on the current branch since its divergence from the repository
+   * default branch, plus a combined patch covering that range. Falls back to
+   * the full HEAD history if no default branch / merge-base is available.
+   */
+  readonly listBranchCommits: (
+    input: GitListBranchCommitsInput,
+  ) => Effect.Effect<GitListBranchCommitsResult, GitCommandError>;
+
+  /**
+   * Read a unified patch for a single commit (`git show`).
+   */
+  readonly showCommit: (
+    input: GitShowCommitInput,
+  ) => Effect.Effect<GitShowCommitResult, GitCommandError>;
 
   /**
    * Pull current branch from upstream using fast-forward only.

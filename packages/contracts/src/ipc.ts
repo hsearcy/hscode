@@ -12,9 +12,13 @@ import type {
   GitCreateWorktreeInput,
   GitCreateWorktreeResult,
   GitInitInput,
+  GitListBranchCommitsInput,
+  GitListBranchCommitsResult,
   GitListBranchesInput,
   GitListBranchesResult,
   GitPullInput,
+  GitShowCommitInput,
+  GitShowCommitResult,
   GitPullResult,
   GitReadWorkingTreeDiffInput,
   GitReadWorkingTreeDiffResult,
@@ -331,6 +335,8 @@ export interface NativeApi {
   git: {
     // Existing branch/worktree API
     listBranches: (input: GitListBranchesInput) => Promise<GitListBranchesResult>;
+    listBranchCommits: (input: GitListBranchCommitsInput) => Promise<GitListBranchCommitsResult>;
+    showCommit: (input: GitShowCommitInput) => Promise<GitShowCommitResult>;
     createWorktree: (input: GitCreateWorktreeInput) => Promise<GitCreateWorktreeResult>;
     createDetachedWorktree: (
       input: GitCreateDetachedWorktreeInput,

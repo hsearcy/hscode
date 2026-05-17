@@ -127,6 +127,17 @@ export const GitListBranchesInput = Schema.Struct({
 });
 export type GitListBranchesInput = typeof GitListBranchesInput.Type;
 
+export const GitListBranchCommitsInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+});
+export type GitListBranchCommitsInput = typeof GitListBranchCommitsInput.Type;
+
+export const GitShowCommitInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  sha: TrimmedNonEmptyStringSchema,
+});
+export type GitShowCommitInput = typeof GitShowCommitInput.Type;
+
 export const GitCreateWorktreeInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   branch: TrimmedNonEmptyStringSchema,
@@ -258,6 +269,29 @@ export const GitListBranchesResult = Schema.Struct({
   hasOriginRemote: Schema.Boolean,
 });
 export type GitListBranchesResult = typeof GitListBranchesResult.Type;
+
+export const GitBranchCommit = Schema.Struct({
+  sha: TrimmedNonEmptyStringSchema,
+  shortSha: TrimmedNonEmptyStringSchema,
+  subject: Schema.String,
+  authorName: Schema.String,
+  authorDate: TrimmedNonEmptyStringSchema,
+});
+export type GitBranchCommit = typeof GitBranchCommit.Type;
+
+export const GitListBranchCommitsResult = Schema.Struct({
+  branch: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
+  baseRef: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
+  commits: Schema.Array(GitBranchCommit),
+  rangePatch: Schema.String,
+});
+export type GitListBranchCommitsResult = typeof GitListBranchCommitsResult.Type;
+
+export const GitShowCommitResult = Schema.Struct({
+  sha: TrimmedNonEmptyStringSchema,
+  patch: Schema.String,
+});
+export type GitShowCommitResult = typeof GitShowCommitResult.Type;
 
 export const GitCreateWorktreeResult = Schema.Struct({
   worktree: GitWorktree,
