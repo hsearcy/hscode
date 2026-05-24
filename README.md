@@ -33,6 +33,19 @@ Run `scripts/install-local.sh` to build the Linux AppImage and install it to
 `~/Applications/dpcode/`. The previous install is moved aside to
 `~/Applications/dpcode.bak` so you can roll back.
 
+The installer also drops four launcher scripts into `~/.local/bin/`:
+
+- `dpcode` — launches the desktop app detached from the shell and starts
+  dpcode-mcp alongside it.
+- `dpcode-mcp-start` — starts the MCP server. Honors `$DPCODE_MCP_BIND` if
+  set, else binds to your Tailscale IPv4 address on port 7331, else
+  `127.0.0.1:7331`. Logs to `~/.dpcode/userdata/logs/mcp.log`.
+- `dpcode-mcp-stop` — kills the MCP server.
+- `dpcode-mcp-log` — `tail -f` the MCP log.
+
+If `~/.local/bin` isn't on your `PATH`, the installer prints the line you
+need to add to your shell rc.
+
 ## Repo layout
 
 - `apps/server` — Node.js WebSocket server. Manages PTYs, codex app-server
