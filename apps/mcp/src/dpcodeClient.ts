@@ -12,7 +12,7 @@ export interface DpcodeConfig {
 }
 
 export function loadConfig(): DpcodeConfig {
-  const home = process.env.DPCODE_HOME ?? join(homedir(), ".dpcode");
+  const home = process.env.DPCODE_HOME ?? join(homedir(), ".hscode");
   // When DPCODE_MCP_URL is set, honor it verbatim. Otherwise leave undefined
   // and let DpcodeWs.connect() rediscover the running desktop backend on every
   // attempt — the AppImage picks an ephemeral port and rotates the auth token

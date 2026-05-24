@@ -1,6 +1,6 @@
-# DP Code
+# HS Code
 
-DP Code is a desktop GUI for running coding agents — Claude Code and Codex —
+HS Code is a desktop GUI for running coding agents — Claude Code and Codex —
 side by side, with persistent threads, real terminal sessions, and a
 controllable MCP surface so one agent can supervise the others.
 
@@ -15,7 +15,7 @@ provider SDKs as passthrough chat.
   the UI so you get attention/completed indicators without polling.
 - **Workspace area.** Multiple terminals per thread, with persistent cwd,
   branch/worktree awareness, and the diff panel docked to the chat.
-- **MCP server (`apps/mcp`, `dpcode-mcp`).** Exposes every dpcode thread as
+- **MCP server (`apps/mcp`, `dpcode-mcp`).** Exposes every HS Code thread as
   tools to a supervising agent — `start_thread`, `send_input`, `read_thread`,
   `wait_for_attention`, `subscribe_threads`. Lets one agent orchestrate the
   rest. See `apps/mcp/README.md`.
@@ -30,21 +30,32 @@ provider SDKs as passthrough chat.
 > the corresponding terminal-cli threads to work.
 
 Run `scripts/install-local.sh` to build the Linux AppImage and install it to
-`~/Applications/dpcode/`. The previous install is moved aside to
-`~/Applications/dpcode.bak` so you can roll back.
+`~/Applications/hscode/`. The previous install is moved aside to
+`~/Applications/hscode.bak` so you can roll back.
+
+If a pre-rename `~/.dpcode/` home is on disk, the installer renames it to
+`~/.hscode/` so saved sessions, MCP subscriptions, terminal history, and the
+sqlite state carry across in one step. Older `dpcode*` wrappers in
+`~/.local/bin/` are cleared so they don't shadow the new ones. The previous
+desktop install at `~/Applications/dpcode/` is left alone — the script
+prints a reminder so you can remove it when ready.
 
 The installer also drops four launcher scripts into `~/.local/bin/`:
 
-- `dpcode` — launches the desktop app detached from the shell and starts
-  dpcode-mcp alongside it.
-- `dpcode-mcp-start` — starts the MCP server. Honors `$DPCODE_MCP_BIND` if
+- `hscode` — launches the desktop app detached from the shell and starts
+  the MCP server alongside it.
+- `hscode-mcp-start` — starts the MCP server. Honors `$DPCODE_MCP_BIND` if
   set, else binds to your Tailscale IPv4 address on port 7331, else
-  `127.0.0.1:7331`. Logs to `~/.dpcode/userdata/logs/mcp.log`.
-- `dpcode-mcp-stop` — kills the MCP server.
-- `dpcode-mcp-log` — `tail -f` the MCP log.
+  `127.0.0.1:7331`. Logs to `~/.hscode/userdata/logs/mcp.log`.
+- `hscode-mcp-stop` — kills the MCP server.
+- `hscode-mcp-log` — `tail -f` the MCP log.
 
 If `~/.local/bin` isn't on your `PATH`, the installer prints the line you
 need to add to your shell rc.
+
+Env var names from the pre-rename project (`DPCODE_HOME`, `DPCODE_MCP_BIND`,
+the `T3CODE_*` terminal hook prefix, etc.) are intentionally preserved so
+existing dotfiles and remote tooling keep working.
 
 ## Repo layout
 

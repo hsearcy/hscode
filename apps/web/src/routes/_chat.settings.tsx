@@ -1121,7 +1121,7 @@ function SettingsRouteView() {
         <div className="space-y-2">
           <SettingsRow
             title="Theme"
-            description="Choose how DP Code looks across the app."
+            description="Choose how HS Code looks across the app."
             resetAction={
               theme !== "system" ? (
                 <SettingResetButton label="theme" onClick={() => setTheme("system")} />

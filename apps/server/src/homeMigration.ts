@@ -1,6 +1,7 @@
 /**
  * FILE: homeMigration.ts
- * Purpose: Imports legacy ~/.t3 state into the new ~/.dpcode home on first startup.
+ * Purpose: Imports legacy ~/.dpcode / ~/.t3 state into the new ~/.hscode home
+ * on first startup, preferring the most recent legacy that exists.
  * Layer: Startup utility
  * Depends on: config path derivation, Effect filesystem/path services, and sqlite snapshots
  */
@@ -8,10 +9,13 @@ import { Data, Effect, FileSystem, Path } from "effect";
 
 import { deriveServerPaths } from "./config";
 
-export const DPCODE_HOME_DIRNAME = ".dpcode";
+export const HSCODE_HOME_DIRNAME = ".hscode";
+export const LEGACY_DPCODE_HOME_DIRNAME = ".dpcode";
 export const LEGACY_T3_HOME_DIRNAME = ".t3";
+// Most recent legacy first so it wins if both exist on the same machine.
+const LEGACY_HOME_DIRNAMES = [LEGACY_DPCODE_HOME_DIRNAME, LEGACY_T3_HOME_DIRNAME] as const;
 const MIGRATIONS_DIRNAME = "migrations";
-const LEGACY_IMPORT_MARKER_BASENAME = "import-from-t3-v1.json";
+const LEGACY_IMPORT_MARKER_BASENAME = "import-from-legacy-v1.json";
 
 export class HomeMigrationError extends Data.TaggedError("HomeMigrationError")<{
   readonly message: string;
@@ -153,7 +157,7 @@ const snapshotSqliteDatabase = (sourcePath: string, targetPath: string) =>
     },
     catch: (cause) =>
       new HomeMigrationError({
-        message: `Failed to snapshot legacy sqlite database from ${sourcePath} to ${targetPath}. Close other DP Code processes and retry.`,
+        message: `Failed to snapshot legacy sqlite database from ${sourcePath} to ${targetPath}. Close other HS Code processes and retry.`,
         cause,
       }),
   });
@@ -202,7 +206,7 @@ const cleanUpStagingDir = (stagingBaseDir: string) =>
 export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeMigrationInput) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const canonicalTargetBaseDir = path.resolve(path.join(input.homeDir, DPCODE_HOME_DIRNAME));
+  const canonicalTargetBaseDir = path.resolve(path.join(input.homeDir, HSCODE_HOME_DIRNAME));
   if (path.resolve(input.baseDir) !== canonicalTargetBaseDir) {
     return {
       status: "skipped",
@@ -211,8 +215,20 @@ export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeM
     };
   }
 
-  const legacyBaseDir = path.resolve(path.join(input.homeDir, LEGACY_T3_HOME_DIRNAME));
-  if (!(yield* fs.exists(legacyBaseDir))) {
+  // Walk the legacy chain in priority order and pick the first one that
+  // actually exists on disk. install-local.sh ordinarily handles the wholesale
+  // ~/.dpcode -> ~/.hscode rename before the server even starts, so this path
+  // mostly catches users who upgraded the desktop app without re-running the
+  // install script.
+  let legacyBaseDir: string | null = null;
+  for (const dirname of LEGACY_HOME_DIRNAMES) {
+    const candidate = path.resolve(path.join(input.homeDir, dirname));
+    if (yield* fs.exists(candidate)) {
+      legacyBaseDir = candidate;
+      break;
+    }
+  }
+  if (!legacyBaseDir) {
     return {
       status: "skipped",
       reason: "legacy-home-missing",
@@ -273,7 +289,7 @@ export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeM
 
   const stagingBaseDir = path.join(
     input.homeDir,
-    `.${DPCODE_HOME_DIRNAME.slice(1)}-migration-${process.pid}-${Date.now()}`,
+    `.${HSCODE_HOME_DIRNAME.slice(1)}-migration-${process.pid}-${Date.now()}`,
   );
   const stagingPaths = yield* deriveServerPaths(stagingBaseDir, input.devUrl);
   yield* fs.makeDirectory(stagingPaths.stateDir, { recursive: true });
@@ -292,7 +308,7 @@ export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeM
       startedAt: migrationStartedAt,
       migratedAt: marker?.migratedAt ?? migrationStartedAt,
       notes: [
-        "Legacy ~/.t3 data is being imported into ~/.dpcode.",
+        `Legacy ${legacyBaseDir} data is being imported into ~/${HSCODE_HOME_DIRNAME}.`,
         "If startup stops midway, the next launch resumes this import instead of starting from scratch.",
       ],
     });
@@ -344,12 +360,12 @@ export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeM
       startedAt: migrationStartedAt,
       migratedAt: new Date().toISOString(),
       notes: [
-        "Legacy ~/.t3 data was imported into ~/.dpcode.",
+        `Legacy ${legacyBaseDir} data was imported into ~/${HSCODE_HOME_DIRNAME}.`,
         "Existing legacy worktree directories were left in place and are still referenced by absolute path.",
       ],
     });
 
-    yield* Effect.logInfo("imported legacy T3 state into DP Code home", {
+    yield* Effect.logInfo("imported legacy state into HS Code home", {
       sourceStateDir: sourcePaths.stateDir,
       targetStateDir: targetPaths.stateDir,
       importedArtifacts,
@@ -368,7 +384,7 @@ export const migrateLegacyHomeIfNeeded = Effect.fn(function* (input: LegacyHomeM
       error instanceof HomeMigrationError
         ? error
         : new HomeMigrationError({
-            message: "Failed to import legacy ~/.t3 state into ~/.dpcode.",
+            message: `Failed to import legacy ${legacyBaseDir} state into ~/${HSCODE_HOME_DIRNAME}.`,
             cause: error,
           }),
     ),

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // dpcode-mcp: expose dpcode thread terminals as MCP tools.
 //
-// Reads thread metadata directly from ~/.dpcode/userdata/state.sqlite (concurrent
+// Reads thread metadata directly from ~/.hscode/userdata/state.sqlite (concurrent
 // readers are safe in WAL mode) and drives terminals via the dpcode WebSocket
 // API (terminal.open / terminal.write + terminal.event push).
 

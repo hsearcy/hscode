@@ -15,7 +15,7 @@ const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
 
 export const DEFAULT_T3_HOME = Effect.map(Effect.service(Path.Path), (path) =>
-  path.join(homedir(), ".dpcode"),
+  path.join(homedir(), ".hscode"),
 );
 
 const MODE_ARGS = {
@@ -486,7 +486,7 @@ const devRunnerCli = Command.make("dev-runner", {
     Argument.withDescription("Development mode to run."),
   ),
   t3Home: Flag.string("home-dir").pipe(
-    Flag.withDescription("Base directory for all DP Code data (equivalent to T3CODE_HOME)."),
+    Flag.withDescription("Base directory for all HS Code data (equivalent to T3CODE_HOME)."),
     Flag.withFallbackConfig(optionalStringConfig("T3CODE_HOME")),
   ),
   authToken: Flag.string("auth-token").pipe(

@@ -1,15 +1,17 @@
 // FILE: desktopUserDataProfile.ts
-// Purpose: Resolves and seeds Electron userData profile paths during the DP Code rename.
+// Purpose: Resolves and seeds Electron userData profile paths across the
+// successive HS Code / DP Code / T3 Code renames.
 // Exports: helpers used by desktop startup and focused migration tests.
 
 import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
-const DEV_USER_DATA_DIR_NAME = "dpcode-dev";
-const PROD_USER_DATA_DIR_NAME = "dpcode";
-const DEV_LEGACY_USER_DATA_DIR_NAMES = ["t3code-dev", "DP Code (Dev)"] as const;
-const PROD_LEGACY_USER_DATA_DIR_NAMES = ["t3code", "DP Code (Alpha)"] as const;
+const DEV_USER_DATA_DIR_NAME = "hscode-dev";
+const PROD_USER_DATA_DIR_NAME = "hscode";
+// Most recent legacy name first so it wins when multiple candidates exist.
+const DEV_LEGACY_USER_DATA_DIR_NAMES = ["dpcode-dev", "t3code-dev", "DP Code (Dev)"] as const;
+const PROD_LEGACY_USER_DATA_DIR_NAMES = ["dpcode", "t3code", "DP Code (Alpha)"] as const;
 const PROFILE_SEED_ENTRY_NAMES = [
   "Local Storage",
   "IndexedDB",
@@ -100,7 +102,7 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
       });
     }
     FS.writeFileSync(
-      Path.join(input.targetPath, "dpcode-profile-seed.json"),
+      Path.join(input.targetPath, "hscode-profile-seed.json"),
       `${JSON.stringify(
         {
           sourcePath,

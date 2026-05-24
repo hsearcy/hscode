@@ -378,7 +378,7 @@ function writeFileIfChanged(filePath: string, content: string, mode: number): vo
 }
 
 function buildManagedZshRc(quotedZshDir: string): string {
-  return `# DP Code zsh rc wrapper
+  return `# HS Code zsh rc wrapper
 _t3code_home="\${T3CODE_ORIGINAL_ZDOTDIR:-$HOME}"
 export ZDOTDIR="$_t3code_home"
 [[ -f "$_t3code_home/.zshrc" ]] && source "$_t3code_home/.zshrc"
@@ -423,7 +423,7 @@ function ensureManagedZshWrappers(zshDir: string): void {
   const quotedZshDir = shellQuote(zshDir);
   writeFileIfChanged(
     path.join(zshDir, ".zshenv"),
-    `# DP Code zsh env wrapper
+    `# HS Code zsh env wrapper
 _t3code_home="\${T3CODE_ORIGINAL_ZDOTDIR:-$HOME}"
 export ZDOTDIR="$_t3code_home"
 [[ -f "$_t3code_home/.zshenv" ]] && source "$_t3code_home/.zshenv"
@@ -433,7 +433,7 @@ export ZDOTDIR=${quotedZshDir}
   );
   writeFileIfChanged(
     path.join(zshDir, ".zprofile"),
-    `# DP Code zsh profile wrapper
+    `# HS Code zsh profile wrapper
 _t3code_home="\${T3CODE_ORIGINAL_ZDOTDIR:-$HOME}"
 export ZDOTDIR="$_t3code_home"
 [[ -f "$_t3code_home/.zprofile" ]] && source "$_t3code_home/.zprofile"

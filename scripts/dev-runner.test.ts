@@ -46,7 +46,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
-    it.effect("defaults T3CODE_HOME to ~/.dpcode when not provided", () =>
+    it.effect("defaults T3CODE_HOME to ~/.hscode when not provided", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
@@ -63,7 +63,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.equal(env.T3CODE_HOME, resolve(homedir(), ".dpcode"));
+        assert.equal(env.T3CODE_HOME, resolve(homedir(), ".hscode"));
       }),
     );
 

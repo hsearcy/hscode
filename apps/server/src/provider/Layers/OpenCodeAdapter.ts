@@ -1766,7 +1766,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   resumedSessionId ??
                   (yield* runOpenCodeSdk("session.create", () =>
                     client.session.create({
-                      title: `DP Code ${input.threadId}`,
+                      title: `HS Code ${input.threadId}`,
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   ).pipe(

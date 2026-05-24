@@ -15,7 +15,7 @@ export function SplashScreen({
     <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center bg-background">
       <div className="flex flex-col items-center gap-5 select-none">
         <img
-          alt="DP Code"
+          alt="HS Code"
           className="size-24 rounded-[26px] object-cover"
           draggable={false}
           src="/dpcode.png"

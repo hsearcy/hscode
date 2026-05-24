@@ -1,6 +1,6 @@
 # Keybindings
 
-DP Code reads keybindings from:
+HS Code reads keybindings from:
 
 - `~/.dpcode/userdata/keybindings.json`
 

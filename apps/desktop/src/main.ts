@@ -102,7 +102,7 @@ const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
 const BASE_DIR =
   process.env.DPCODE_HOME?.trim() ||
   process.env.T3CODE_HOME?.trim() ||
-  Path.join(OS.homedir(), ".dpcode");
+  Path.join(OS.homedir(), ".hscode");
 const STATE_DIR = Path.join(BASE_DIR, "userdata");
 const DESKTOP_SCHEME = "t3";
 const ROOT_DIR = Path.resolve(__dirname, "../../..");
@@ -116,7 +116,7 @@ const isRunningOnWSL = (() => {
     return false;
   }
 })();
-const APP_DISPLAY_NAME = isDevelopment ? "DP Code (Dev)" : "DP Code (Alpha)";
+const APP_DISPLAY_NAME = isDevelopment ? "HS Code (Dev)" : "HS Code (Alpha)";
 const APP_USER_MODEL_ID = isDevelopment ? "com.t3tools.dpcode.dev" : "com.t3tools.dpcode";
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
@@ -678,7 +678,7 @@ function handleFatalStartupError(stage: string, error: unknown): void {
   console.error(`[desktop] fatal startup error (${stage})`, error);
   if (!isQuitting) {
     isQuitting = true;
-    dialog.showErrorBox("DP Code failed to start", `Stage: ${stage}\n${message}${detail}`);
+    dialog.showErrorBox("HS Code failed to start", `Stage: ${stage}\n${message}${detail}`);
   }
   stopBackend();
   restoreStdIoCapture?.();
@@ -786,7 +786,7 @@ async function checkForUpdatesFromMenu(): Promise<void> {
     void dialog.showMessageBox({
       type: "info",
       title: "You're up to date!",
-      message: `DP Code ${updateState.currentVersion} is currently the newest version available.`,
+      message: `HS Code ${updateState.currentVersion} is currently the newest version available.`,
       buttons: ["OK"],
     });
   } else if (updateState.status === "error") {
@@ -1018,11 +1018,11 @@ function showDesktopNotification(input: {
  *
  * Electron derives the default userData path from `productName` in
  * package.json, which currently produces directories with spaces and
- * parentheses (e.g. `~/.config/DP Code (Alpha)` on Linux). This is
+ * parentheses (e.g. `~/.config/HS Code (Alpha)` on Linux). This is
  * unfriendly for shell usage and violates Linux naming conventions.
  *
- * We override it to a clean lowercase DP Code name. Legacy T3 Code/early
- * DP Code Chromium profiles are intentionally left in place so both apps can
+ * We override it to a clean lowercase HS Code name. Legacy T3 Code/early
+ * HS Code Chromium profiles are intentionally left in place so both apps can
  * coexist without sharing renderer storage.
  */
 function resolveUserDataPath(): string {
@@ -1033,12 +1033,12 @@ function resolveUserDataPath(): string {
     legacyPaths: resolveLegacyDesktopUserDataPaths({ appDataBase, isDevelopment }),
   });
   if (seedResult.status === "seeded") {
-    console.info("[desktop] Seeded DP Code Electron profile from legacy profile", {
+    console.info("[desktop] Seeded HS Code Electron profile from legacy profile", {
       sourcePath: seedResult.sourcePath,
       targetPath: seedResult.targetPath,
     });
   } else if (seedResult.status === "seed-failed") {
-    console.warn("[desktop] Failed to seed DP Code Electron profile from legacy profile", {
+    console.warn("[desktop] Failed to seed HS Code Electron profile from legacy profile", {
       sourcePath: seedResult.sourcePath,
       targetPath: seedResult.targetPath,
       error: seedResult.error,

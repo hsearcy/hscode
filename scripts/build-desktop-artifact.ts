@@ -721,13 +721,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
     private: true,
-    description: "DP Code desktop build",
+    description: "HS Code desktop build",
     author: "Emanuele Di Pietro",
     main: "apps/desktop/dist-electron/main.js",
     build: yield* createBuildConfig(
       options.platform,
       options.target,
-      desktopPackageJson.productName ?? "DP Code",
+      desktopPackageJson.productName ?? "HS Code",
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
@@ -880,7 +880,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a desktop artifact for DP Code."),
+  Command.withDescription("Build a desktop artifact for HS Code."),
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 

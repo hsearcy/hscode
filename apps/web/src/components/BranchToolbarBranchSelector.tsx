@@ -247,7 +247,7 @@ function handleCheckoutError(
                   type: "warning",
                   title: "Changes saved, but not reapplied.",
                   description:
-                    "DP Code switched branches and kept your changes in a stash because they could not be restored onto this branch cleanly.",
+                    "HS Code switched branches and kept your changes in a stash because they could not be restored onto this branch cleanly.",
                   data: { copyText: toBranchActionErrorMessage(stashError) },
                   actionProps: {
                     children: "Discard stash",

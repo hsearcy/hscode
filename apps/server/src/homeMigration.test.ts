@@ -1,6 +1,7 @@
 /**
  * FILE: homeMigration.test.ts
- * Purpose: Verifies first-run import and resume behavior for the ~/.t3 -> ~/.dpcode migration.
+ * Purpose: Verifies first-run import and resume behavior for the
+ * ~/.t3 / ~/.dpcode -> ~/.hscode migration chain.
  * Layer: Server startup tests
  * Depends on: deriveServerPaths, node:sqlite fixtures, and the migration marker contract
  */
@@ -15,8 +16,8 @@ import { Effect, FileSystem } from "effect";
 
 import { deriveServerPaths } from "./config";
 import {
-  DPCODE_HOME_DIRNAME,
   getLegacyImportMarkerPath,
+  HSCODE_HOME_DIRNAME,
   LEGACY_T3_HOME_DIRNAME,
   migrateLegacyHomeIfNeeded,
 } from "./homeMigration";
@@ -62,7 +63,7 @@ it.layer(NodeServices.layer)("homeMigration", (it) => {
       );
 
       const legacyBaseDir = path.join(tempHome, LEGACY_T3_HOME_DIRNAME);
-      const targetBaseDir = path.join(tempHome, DPCODE_HOME_DIRNAME);
+      const targetBaseDir = path.join(tempHome, HSCODE_HOME_DIRNAME);
       const legacyPaths = yield* deriveServerPaths(legacyBaseDir, undefined);
       const targetPaths = yield* deriveServerPaths(targetBaseDir, undefined);
 
@@ -112,7 +113,7 @@ it.layer(NodeServices.layer)("homeMigration", (it) => {
       );
 
       const legacyBaseDir = path.join(tempHome, LEGACY_T3_HOME_DIRNAME);
-      const targetBaseDir = path.join(tempHome, DPCODE_HOME_DIRNAME);
+      const targetBaseDir = path.join(tempHome, HSCODE_HOME_DIRNAME);
       const legacyPaths = yield* deriveServerPaths(legacyBaseDir, undefined);
       const targetPaths = yield* deriveServerPaths(targetBaseDir, undefined);
 
@@ -145,7 +146,7 @@ it.layer(NodeServices.layer)("homeMigration", (it) => {
       );
 
       const legacyBaseDir = path.join(tempHome, LEGACY_T3_HOME_DIRNAME);
-      const targetBaseDir = path.join(tempHome, DPCODE_HOME_DIRNAME);
+      const targetBaseDir = path.join(tempHome, HSCODE_HOME_DIRNAME);
       const legacyPaths = yield* deriveServerPaths(legacyBaseDir, undefined);
       const targetPaths = yield* deriveServerPaths(targetBaseDir, undefined);
 
@@ -177,7 +178,7 @@ it.layer(NodeServices.layer)("homeMigration", (it) => {
       );
 
       const legacyBaseDir = path.join(tempHome, LEGACY_T3_HOME_DIRNAME);
-      const targetBaseDir = path.join(tempHome, DPCODE_HOME_DIRNAME);
+      const targetBaseDir = path.join(tempHome, HSCODE_HOME_DIRNAME);
       const legacyPaths = yield* deriveServerPaths(legacyBaseDir, undefined);
       const targetPaths = yield* deriveServerPaths(targetBaseDir, undefined);
       const markerPath = yield* getLegacyImportMarkerPath(targetPaths.stateDir);
@@ -242,7 +243,7 @@ it.layer(NodeServices.layer)("homeMigration", (it) => {
       );
 
       const legacyBaseDir = path.join(tempHome, LEGACY_T3_HOME_DIRNAME);
-      const targetBaseDir = path.join(tempHome, DPCODE_HOME_DIRNAME);
+      const targetBaseDir = path.join(tempHome, HSCODE_HOME_DIRNAME);
       const devUrl = new URL("http://127.0.0.1:5173");
       const legacyPaths = yield* deriveServerPaths(legacyBaseDir, devUrl);
       const targetPaths = yield* deriveServerPaths(targetBaseDir, devUrl);
