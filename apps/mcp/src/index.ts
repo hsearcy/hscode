@@ -425,7 +425,12 @@ function registerTools(server: McpServer): void {
         cwd: row.worktreePath ?? row.workspaceRoot,
       });
       const submit = args.submit ?? true;
-      const data = submit && !args.text.endsWith("\r") ? `${args.text}\r` : args.text;
+      // Treat trailing \n or \r as "already terminated" so we don't append a
+      // second submit byte. Claude Code's TUI parses `\n` as a soft newline
+      // in the composer; chasing it with `\r` can submit the existing draft
+      // before the new text is registered.
+      const endsWithSubmit = args.text.endsWith("\r") || args.text.endsWith("\n");
+      const data = submit && !endsWithSubmit ? `${args.text}\r` : args.text;
       await ws.writeTerminal({ threadId: row.threadId, data });
       return {
         content: [
