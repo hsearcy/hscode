@@ -816,10 +816,10 @@ function prStatusIndicator(pr: ThreadPr): PrStatusIndicator | null {
 function T3Wordmark() {
   return (
     <span
-      aria-label="DP"
+      aria-label="HS"
       className="shrink-0 text-[14px] font-semibold tracking-tight text-foreground"
     >
-      DP
+      HS
     </span>
   );
 }
