@@ -24,10 +24,12 @@ provider SDKs as passthrough chat.
 
 ## Install
 
-> [!WARNING]
-> You need [Claude Code](https://docs.claude.com/en/docs/claude-code) and/or
-> [Codex CLI](https://github.com/openai/codex) installed and authorized for
-> the corresponding terminal-cli threads to work.
+Requirements:
+
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), authorized.
+- [Codex CLI](https://github.com/openai/codex), authorized.
+- [Tailscale](https://tailscale.com) recommended for reaching the MCP
+  server from other machines.
 
 Run `scripts/install-local.sh` to build the Linux AppImage and install it to
 `~/Applications/hscode/`. The previous install is moved aside to
