@@ -1,11 +1,16 @@
 # @t3tools/mcp
 
-A stdio MCP server that exposes dpcode threads (Claude / Codex terminal sessions) as tools for a supervising agent. Lets one agent monitor and drive every dpcode thread you have open.
+A stdio MCP server (`hscode-mcp`) that exposes HS Code threads (Claude /
+Codex terminal sessions) as tools for a supervising agent. Lets one agent
+monitor and drive every HS Code thread you have open.
 
 ## What it talks to
 
-- **Reads** thread metadata directly from `~/.dpcode/userdata/state.sqlite` (concurrent readers are safe under WAL).
-- **Writes** to terminals via the dpcode WebSocket API (`terminal.open`, `terminal.write`) and subscribes to `terminal.event` push messages to track each CLI's `agentState` ("running" | "attention" | "review").
+- **Reads** thread metadata directly from `~/.hscode/userdata/state.sqlite`
+  (concurrent readers are safe under WAL).
+- **Writes** to terminals via the HS Code WebSocket API (`terminal.open`,
+  `terminal.write`) and subscribes to `terminal.event` push messages to
+  track each CLI's `agentState` ("running" | "attention" | "review").
 
 ## Tools
 
@@ -25,13 +30,21 @@ A stdio MCP server that exposes dpcode threads (Claude / Codex terminal sessions
 
 ## Configuration
 
-Environment variables:
+Environment variables (names preserved across the HS Code rename so existing
+configs keep working):
 
-- `DPCODE_MCP_URL` (default `ws://127.0.0.1:32480`) — WebSocket URL of the running dpcode server. Use the AppImage's port (visible via `ss -tlnp | grep dpcode`) or the URL of a `bun run apps/server start` instance.
-- `DPCODE_AUTH_TOKEN` — required if the dpcode server was started with `--auth-token`.
-- `DPCODE_HOME` (default `~/.dpcode`) — where `userdata/state.sqlite` lives.
-- `DPCODE_MCP_BIND` — if set (e.g. `0.0.0.0:7331`, `:7331`, or `100.112.27.101:7331`), runs as a Streamable HTTP MCP server at `/mcp` instead of stdio. If unset, runs as stdio.
-- `DPCODE_MCP_BEARER` — when binding HTTP, optional bearer token; requests must send `Authorization: Bearer <token>`.
+- `DPCODE_MCP_URL` (default `ws://127.0.0.1:32480`) — WebSocket URL of the
+  running HS Code server. Use the AppImage's port (visible via
+  `ss -tlnp | grep hscode`) or the URL of a `bun run apps/server start`
+  instance.
+- `DPCODE_AUTH_TOKEN` — required if the HS Code server was started with
+  `--auth-token`.
+- `DPCODE_HOME` (default `~/.hscode`) — where `userdata/state.sqlite` lives.
+- `DPCODE_MCP_BIND` — if set (e.g. `0.0.0.0:7331`, `:7331`, or
+  `100.112.27.101:7331`), runs as a Streamable HTTP MCP server at `/mcp`
+  instead of stdio. If unset, runs as stdio.
+- `DPCODE_MCP_BEARER` — when binding HTTP, optional bearer token; requests
+  must send `Authorization: Bearer <token>`.
 
 ## Running
 
@@ -54,7 +67,7 @@ DPCODE_MCP_URL="ws://127.0.0.1:32480" \
 ### Local stdio
 
 ```bash
-claude mcp add dpcode \
+claude mcp add hscode \
   --scope user \
   --env DPCODE_MCP_URL=ws://127.0.0.1:32480 \
   -- bun run /home/hfsearcy/git/dpcode/apps/mcp/src/index.ts
@@ -62,7 +75,7 @@ claude mcp add dpcode \
 
 ### Remote HTTP (any machine on your Tailnet)
 
-Run the MCP once on the host where dpcode lives:
+Run the MCP once on the host where HS Code lives:
 
 ```bash
 DPCODE_MCP_BIND="$(tailscale ip -4):7331" \
@@ -73,7 +86,7 @@ DPCODE_MCP_URL="ws://127.0.0.1:32480" \
 Then from any Tailnet machine:
 
 ```bash
-claude mcp add dpcode --transport http http://<wsl-tailnet-name>:7331/mcp
+claude mcp add hscode --transport http http://<wsl-tailnet-name>:7331/mcp
 ```
 
 Use `--header "Authorization: Bearer <token>"` if you set `DPCODE_MCP_BEARER`.
@@ -87,6 +100,6 @@ Use `--header "Authorization: Bearer <token>"` if you set `DPCODE_MCP_BEARER`.
 
 ## Caveats
 
-- This is an internal dpcode protocol; pin to a commit.
+- This is an internal HS Code protocol; pin to a commit.
 - `agentState` for a thread is only known after at least one `terminal.event` for it has been observed by this MCP process — typically that happens on the first `read_thread` / `send_input` (which calls `terminal.open`).
 - "Selecting menu option 1" with `send_input({text: "1"})` only works if the menu is currently active. Always `read_thread` first to verify what the CLI is showing.

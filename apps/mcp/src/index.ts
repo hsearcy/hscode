@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-// dpcode-mcp: expose dpcode thread terminals as MCP tools.
+// hscode-mcp: expose HS Code thread terminals as MCP tools.
 //
 // Reads thread metadata directly from ~/.hscode/userdata/state.sqlite (concurrent
-// readers are safe in WAL mode) and drives terminals via the dpcode WebSocket
+// readers are safe in WAL mode) and drives terminals via the HS Code WebSocket
 // API (terminal.open / terminal.write + terminal.event push).
 
 import { randomUUID } from "node:crypto";
@@ -54,7 +54,7 @@ const ws = new DpcodeWs(cfg);
 
 // ── Global thread-event subscriptions (webhook fan-out) ──────────────────
 //
-// Remote callers register a webhook once and dpcode-mcp POSTs to it every
+// Remote callers register a webhook once and hscode-mcp POSTs to it every
 // time *any* thread's agentState transitions. Events only flow for terminals
 // the server has opened (web client, another MCP, or this process via
 // read_thread/notify_on_idle), so newly created threads won't appear until
@@ -105,7 +105,7 @@ function persistSubscriptions(): void {
     writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(rows, null, 2));
   } catch (err) {
     console.error(
-      `[dpcode-mcp] failed to persist subscriptions to ${SUBSCRIPTIONS_PATH}:`,
+      `[hscode-mcp] failed to persist subscriptions to ${SUBSCRIPTIONS_PATH}:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -122,7 +122,7 @@ function loadSubscriptions(): number {
   try {
     rows = JSON.parse(raw);
   } catch {
-    console.error(`[dpcode-mcp] subscriptions file ${SUBSCRIPTIONS_PATH} is corrupt — ignoring.`);
+    console.error(`[hscode-mcp] subscriptions file ${SUBSCRIPTIONS_PATH} is corrupt — ignoring.`);
     return 0;
   }
   if (!Array.isArray(rows)) return 0;
@@ -257,7 +257,7 @@ async function fanOutThreadEvent(input: {
         });
       } catch (err) {
         console.error(
-          `[dpcode-mcp] subscribe_threads: POST to ${sub.url} failed:`,
+          `[hscode-mcp] subscribe_threads: POST to ${sub.url} failed:`,
           err instanceof Error ? err.message : err,
         );
       }
@@ -306,7 +306,7 @@ function resolveThread(input: string): ThreadRow {
 
 function makeServer(): McpServer {
   const server = new McpServer({
-    name: "dpcode-mcp",
+    name: "hscode-mcp",
     version: "0.0.1",
   });
   registerTools(server);
@@ -319,7 +319,7 @@ function registerTools(server: McpServer): void {
     "list_threads",
     {
       description:
-        "List dpcode threads (Claude/Codex terminal sessions). Filter by project name/path or thread title. Sorted by latest user-message time, then by updatedAt.",
+        "List HS Code threads (Claude/Codex terminal sessions). Filter by project name/path or thread title. Sorted by latest user-message time, then by updatedAt.",
       inputSchema: {
         project: z
           .string()
@@ -354,7 +354,7 @@ function registerTools(server: McpServer): void {
     "read_thread",
     {
       description:
-        "Read the rendered terminal scrollback of a dpcode thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
+        "Read the rendered terminal scrollback of an HS Code thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
         "Interpreting the output (Claude Code / Codex TUI):\n" +
         "- Lines starting with `> ` (chat-bubble blocks in scrollback) are messages the USER actually sent. These are historical.\n" +
         "- Lines starting with `● ` are messages the ASSISTANT sent (Claude's responses, tool calls).\n" +
@@ -407,7 +407,7 @@ function registerTools(server: McpServer): void {
     "send_input",
     {
       description:
-        "Send text to a dpcode thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
+        "Send text to an HS Code thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
       inputSchema: {
         thread: z.string().describe("Thread id (UUID) or unique title fragment."),
         text: z.string().min(1).describe("Bytes to send. Use \\r for Enter, \\x1b for ESC."),
@@ -457,7 +457,7 @@ function registerTools(server: McpServer): void {
     "wait_for_attention",
     {
       description:
-        'Block until the dpcode thread\'s CLI is idle — either it has finished a turn (agentState="review") or it is sitting on a permission prompt (agentState="attention") — or until the timeout elapses. Returns the latest activity record and a fresh screen snapshot. Useful after send_input to know when the CLI has finished responding and is ready for the next instruction.\n\nNote: in this codebase "review" is the post-turn idle state (CLI just stopped streaming) and "attention" is specifically a permission/approval prompt. By default this waits for either. Set permissionPromptOnly=true to wait only for an approval prompt.',
+        'Block until the HS Code thread\'s CLI is idle — either it has finished a turn (agentState="review") or it is sitting on a permission prompt (agentState="attention") — or until the timeout elapses. Returns the latest activity record and a fresh screen snapshot. Useful after send_input to know when the CLI has finished responding and is ready for the next instruction.\n\nNote: in this codebase "review" is the post-turn idle state (CLI just stopped streaming) and "attention" is specifically a permission/approval prompt. By default this waits for either. Set permissionPromptOnly=true to wait only for an approval prompt.',
       inputSchema: {
         thread: z.string().describe("Thread id (UUID) or unique title fragment."),
         timeoutSeconds: z.number().int().min(1).max(900).optional().describe("Default 120."),
@@ -517,7 +517,7 @@ function registerTools(server: McpServer): void {
     "notify_on_idle",
     {
       description:
-        'Register a webhook to be called when a dpcode thread\'s CLI goes idle (turn complete or sitting on an approval prompt). Unlike `wait_for_attention`, this returns IMMEDIATELY — the caller\'s turn is not blocked. A background watcher POSTs JSON to `notifyUrl` once the thread reaches the target agent state (`review` for turn-complete, `attention` for permission prompt) or when the timeout elapses. Useful for remote agents that should not hold an HTTP request open for minutes.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "threadId": "<uuid>",\n  "agentState": "review" | "attention" | null,\n  "timedOut": boolean,\n  "screen": "<last 80 meaningful lines of terminal scrollback>",\n  "activity": { ... raw activity record ... } | null\n}\n```\nThe webhook is best-effort: failures to POST are logged but not retried.',
+        'Register a webhook to be called when an HS Code thread\'s CLI goes idle (turn complete or sitting on an approval prompt). Unlike `wait_for_attention`, this returns IMMEDIATELY — the caller\'s turn is not blocked. A background watcher POSTs JSON to `notifyUrl` once the thread reaches the target agent state (`review` for turn-complete, `attention` for permission prompt) or when the timeout elapses. Useful for remote agents that should not hold an HTTP request open for minutes.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "threadId": "<uuid>",\n  "agentState": "review" | "attention" | null,\n  "timedOut": boolean,\n  "screen": "<last 80 meaningful lines of terminal scrollback>",\n  "activity": { ... raw activity record ... } | null\n}\n```\nThe webhook is best-effort: failures to POST are logged but not retried.',
       inputSchema: {
         thread: z.string().describe("Thread id (UUID) or unique title fragment."),
         notifyUrl: z
@@ -610,7 +610,7 @@ function registerTools(server: McpServer): void {
         } catch (err) {
           // Best-effort. Log to stderr so it shows up in the MCP server logs.
           console.error(
-            `[dpcode-mcp] notify_on_idle: POST to ${args.notifyUrl} failed:`,
+            `[hscode-mcp] notify_on_idle: POST to ${args.notifyUrl} failed:`,
             err instanceof Error ? err.message : err,
           );
         }
@@ -643,7 +643,7 @@ function registerTools(server: McpServer): void {
     "subscribe_threads",
     {
       description:
-        'Register a webhook to receive a POST every time ANY dpcode thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the dpcode server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "threadTitle": "<thread title>",\n  "project": "<project name>",\n  "workspaceRoot": "<absolute path>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<assistant turn / tail, if screenScope != off>"\n}\n```',
+        'Register a webhook to receive a POST every time ANY HS Code thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the HS Code server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "threadTitle": "<thread title>",\n  "project": "<project name>",\n  "workspaceRoot": "<absolute path>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<assistant turn / tail, if screenScope != off>"\n}\n```',
       inputSchema: {
         notifyUrl: z
           .string()
@@ -801,7 +801,7 @@ function registerTools(server: McpServer): void {
     "start_thread",
     {
       description:
-        "Create a new dpcode terminal thread that launches a Claude Code or Codex CLI session in the target project — equivalent to the desktop app's \"New Thread → Claude Code / Codex\" button. The thread is created in terminal-cli mode with the project's local workspace; the CLI starts as soon as the terminal is opened. Returns the new threadId so you can immediately drive it with `send_input` / `read_thread` / `wait_for_attention`.",
+        "Create a new HS Code terminal thread that launches a Claude Code or Codex CLI session in the target project — equivalent to the desktop app's \"New Thread → Claude Code / Codex\" button. The thread is created in terminal-cli mode with the project's local workspace; the CLI starts as soon as the terminal is opened. Returns the new threadId so you can immediately drive it with `send_input` / `read_thread` / `wait_for_attention`.",
       inputSchema: {
         project: z
           .string()
@@ -922,7 +922,7 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
   // The SDK's StreamableHTTPServerTransport in stateless mode (sessionIdGenerator: undefined)
   // is one-shot — it throws on the second handleRequest call. So we mint a fresh
   // McpServer + transport per HTTP request. Tool registration is cheap; the
-  // long-lived state (dpcode WS client + activity cache) lives outside the McpServer.
+  // long-lived state (HS Code WS client + activity cache) lives outside the McpServer.
   const http = createHttpServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (bearer) {
       const header = req.headers["authorization"];
@@ -951,7 +951,7 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
       const body = await readBody(req);
       await transport.handleRequest(req, res, body);
     } catch (err) {
-      process.stderr.write(`[dpcode-mcp] http error: ${(err as Error).stack ?? err}\n`);
+      process.stderr.write(`[hscode-mcp] http error: ${(err as Error).stack ?? err}\n`);
       if (!res.headersSent) {
         res.statusCode = 500;
         res.end("internal error");
@@ -968,18 +968,18 @@ async function runHttp(bind: { host: string; port: number }, bearer: string | un
 
   await new Promise<void>((resolve) => http.listen(bind.port, bind.host, resolve));
   process.stderr.write(
-    `[dpcode-mcp] listening on http://${bind.host}:${bind.port}/mcp (bearer: ${bearer ? "required" : "off"})\n`,
+    `[hscode-mcp] listening on http://${bind.host}:${bind.port}/mcp (bearer: ${bearer ? "required" : "off"})\n`,
   );
 }
 
 async function main() {
-  // Connect to dpcode first so we start collecting terminal.event activity
+  // Connect to HS Code first so we start collecting terminal.event activity
   // from the moment the MCP starts.
   try {
     await ws.connect();
   } catch (err) {
     process.stderr.write(
-      `[dpcode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
+      `[hscode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
     );
   }
 
@@ -988,7 +988,7 @@ async function main() {
   const restored = loadSubscriptions();
   if (restored > 0) {
     ensureGlobalPushHandler();
-    process.stderr.write(`[dpcode-mcp] restored ${restored} webhook subscription(s)\n`);
+    process.stderr.write(`[hscode-mcp] restored ${restored} webhook subscription(s)\n`);
   }
 
   const bindRaw = process.env.DPCODE_MCP_BIND;
@@ -1002,6 +1002,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`[dpcode-mcp] fatal: ${(err as Error).stack ?? err}\n`);
+  process.stderr.write(`[hscode-mcp] fatal: ${(err as Error).stack ?? err}\n`);
   process.exit(1);
 });

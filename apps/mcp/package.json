@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "bin": {
-    "dpcode-mcp": "./src/index.ts"
+    "hscode-mcp": "./src/index.ts"
   },
   "type": "module",
   "scripts": {
