@@ -35,13 +35,6 @@ Run `scripts/install-local.sh` to build the Linux AppImage and install it to
 `~/Applications/hscode/`. The previous install is moved aside to
 `~/Applications/hscode.bak` so you can roll back.
 
-If a pre-rename `~/.dpcode/` home is on disk, the installer renames it to
-`~/.hscode/` so saved sessions, MCP subscriptions, terminal history, and the
-sqlite state carry across in one step. Older `dpcode*` wrappers in
-`~/.local/bin/` are cleared so they don't shadow the new ones. The previous
-desktop install at `~/Applications/dpcode/` is left alone — the script
-prints a reminder so you can remove it when ready.
-
 The installer also drops four launcher scripts into `~/.local/bin/`:
 
 - `hscode` — launches the desktop app detached from the shell and starts
@@ -54,10 +47,6 @@ The installer also drops four launcher scripts into `~/.local/bin/`:
 
 If `~/.local/bin` isn't on your `PATH`, the installer prints the line you
 need to add to your shell rc.
-
-Env var names from the pre-rename project (`DPCODE_HOME`, `DPCODE_MCP_BIND`,
-the `T3CODE_*` terminal hook prefix, etc.) are intentionally preserved so
-existing dotfiles and remote tooling keep working.
 
 ## Repo layout
 
