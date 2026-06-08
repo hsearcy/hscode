@@ -51,6 +51,7 @@ const NON_REPOSITORY_STATUS_DETAILS = Object.freeze({
   upstreamRef: null,
   hasWorkingTreeChanges: false,
   workingTree: { files: [], insertions: 0, deletions: 0 },
+  netDiff: { insertions: 0, deletions: 0 },
   hasUpstream: false,
   aheadCount: 0,
   behindCount: 0,
@@ -1312,6 +1313,31 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           deletions += file.deletions;
         }
 
+        // Net diff vs base = committed branch changes (the same `<base>..HEAD`
+        // range the diff panel's Review tab renders) plus the uncommitted
+        // working-tree totals above. These are disjoint, so summing them yields
+        // the worktree's full change set against its base. On a base-less branch
+        // (no resolvable merge-base, e.g. main) it collapses to the working tree.
+        const netDiffBaseOid = yield* resolveBaseMergeBase(cwd).pipe(
+          Effect.catch(() => Effect.succeed(null)),
+        );
+        let committedInsertions = 0;
+        let committedDeletions = 0;
+        if (netDiffBaseOid) {
+          const committedNumstat = yield* executeGit(
+            "GitCore.statusDetails.netDiffCommitted",
+            cwd,
+            ["diff", "--numstat", "--no-color", "--no-ext-diff", `${netDiffBaseOid}..HEAD`],
+            { allowNonZeroExit: true, timeoutMs: WORKING_TREE_DIFF_TIMEOUT_MS },
+          ).pipe(Effect.catch(() => Effect.succeed({ code: 1, stdout: "", stderr: "" })));
+          if (committedNumstat.code === 0) {
+            for (const entry of parseNumstatEntries(committedNumstat.stdout)) {
+              committedInsertions += entry.insertions;
+              committedDeletions += entry.deletions;
+            }
+          }
+        }
+
         return {
           branch,
           upstreamRef,
@@ -1320,6 +1346,10 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
             files,
             insertions,
             deletions,
+          },
+          netDiff: {
+            insertions: committedInsertions + insertions,
+            deletions: committedDeletions + deletions,
           },
           hasUpstream: upstreamRef !== null,
           aheadCount,
@@ -1333,6 +1363,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           branch: details.branch,
           hasWorkingTreeChanges: details.hasWorkingTreeChanges,
           workingTree: details.workingTree,
+          netDiff: details.netDiff,
           hasUpstream: details.hasUpstream,
           aheadCount: details.aheadCount,
           behindCount: details.behindCount,
@@ -1676,7 +1707,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         if (localBranchResult.code !== 0) {
           const stderr = localBranchResult.stderr.trim();
           if (stderr.toLowerCase().includes("not a git repository")) {
-            return { branches: [], isRepo: false, hasOriginRemote: false };
+            return { branches: [], worktrees: [], isRepo: false, hasOriginRemote: false };
           }
           return yield* createGitCommandError(
             "GitCore.listBranches",
@@ -1745,7 +1776,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           { concurrency: "unbounded" },
         ).pipe(Effect.catchIf(isMissingGitCwdError, () => Effect.succeed(null)));
         if (branchMetadata === null) {
-          return { branches: [], isRepo: false, hasOriginRemote: false };
+          return { branches: [], worktrees: [], isRepo: false, hasOriginRemote: false };
         }
 
         const [defaultRef, worktreeList, remoteBranchResult, remoteNamesResult, branchLastCommit] =
@@ -1769,24 +1800,54 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
             ? defaultRef.stdout.trim().replace(/^refs\/remotes\/origin\//, "")
             : null;
 
+        // Parse every worktree (including detached-HEAD ones, which have no
+        // `branch` line) so the diff panel switcher can list them all. We still
+        // build worktreeMap (branch -> path) for GitBranch.worktreePath.
         const worktreeMap = new Map<string, string>();
+        type WorktreeAccumulator = {
+          path: string;
+          head: string | null;
+          branch: string | null;
+          mtimeMs: number;
+        };
+        const worktreeEntries: WorktreeAccumulator[] = [];
         if (worktreeList.code === 0) {
-          let currentPath: string | null = null;
+          let current: WorktreeAccumulator | null = null;
           for (const line of worktreeList.stdout.split("\n")) {
             if (line.startsWith("worktree ")) {
               const candidatePath = line.slice("worktree ".length);
-              const exists = yield* fileSystem.stat(candidatePath).pipe(
-                Effect.map(() => true),
-                Effect.catch(() => Effect.succeed(false)),
+              const info = yield* fileSystem.stat(candidatePath).pipe(
+                Effect.map((stat) => stat),
+                Effect.catch(() => Effect.succeed(null)),
               );
-              currentPath = exists ? candidatePath : null;
-            } else if (line.startsWith("branch refs/heads/") && currentPath) {
-              worktreeMap.set(line.slice("branch refs/heads/".length), currentPath);
+              if (info) {
+                current = {
+                  path: candidatePath,
+                  head: null,
+                  branch: null,
+                  mtimeMs: info.mtime?.getTime() ?? 0,
+                };
+                worktreeEntries.push(current);
+              } else {
+                current = null;
+              }
+            } else if (current && line.startsWith("HEAD ")) {
+              const sha = line.slice("HEAD ".length).trim();
+              current.head = sha.length > 0 ? sha.slice(0, 8) : null;
+            } else if (current && line.startsWith("branch refs/heads/")) {
+              current.branch = line.slice("branch refs/heads/".length);
+              worktreeMap.set(current.branch, current.path);
             } else if (line === "") {
-              currentPath = null;
+              current = null;
             }
           }
         }
+
+        // Surface the most recently touched worktrees first so freshly created
+        // ones are easy to find in the switcher.
+        const worktrees = worktreeEntries
+          .toSorted((a, b) => b.mtimeMs - a.mtimeMs)
+          .map((entry) => ({ path: entry.path, branch: entry.branch, head: entry.head }));
 
         const localBranches = localBranchResult.stdout
           .split("\n")
@@ -1847,7 +1908,12 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
 
         const branches = [...localBranches, ...remoteBranches];
 
-        return { branches, isRepo: true, hasOriginRemote: remoteNames.includes("origin") };
+        return {
+          branches,
+          worktrees,
+          isRepo: true,
+          hasOriginRemote: remoteNames.includes("origin"),
+        };
       });
 
     const BRANCH_COMMITS_LIMIT = 500;

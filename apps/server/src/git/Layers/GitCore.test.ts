@@ -396,6 +396,30 @@ it.layer(TestLayer)("git integration", (it) => {
       }),
     );
 
+    it.effect("listBranches surfaces detached worktrees with a null branch", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        const detachedPath = path.join(tmp, "..", `detached-${path.basename(tmp)}`);
+        yield* git(tmp, ["worktree", "add", "--detach", detachedPath, "HEAD"]);
+
+        const result = yield* core.listBranches({ cwd: tmp });
+        const detachedBasename = path.basename(detachedPath);
+        // A detached worktree has no branch, so a branch-derived list would drop
+        // it — it must still appear here (branch null, HEAD sha present).
+        const detached = result.worktrees.find((worktree) =>
+          worktree.path.endsWith(detachedBasename),
+        );
+        expect(detached).toBeDefined();
+        expect(detached!.branch).toBeNull();
+        expect(detached!.head).toBeTruthy();
+        // The main (branched) worktree is still listed alongside it.
+        expect(result.worktrees.some((worktree) => worktree.branch !== null)).toBe(true);
+      }),
+    );
+
     it.effect("includes remoteName metadata for remotes with slash in the name", () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();
@@ -1505,6 +1529,36 @@ it.layer(TestLayer)("git integration", (it) => {
           { path: "new-file.ts", insertions: 2, deletions: 0 },
           { path: "README.md", insertions: 1, deletions: 1 },
         ]);
+      }),
+    );
+
+    it.effect("netDiff reflects committed branch changes plus uncommitted edits", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+        const defaultBranch = (yield* core.listBranches({ cwd: tmp })).branches.find(
+          (branch) => branch.current,
+        )!.name;
+        // Base resolution relies on the default branch being a known candidate.
+        expect(["main", "master"]).toContain(defaultBranch);
+
+        yield* git(tmp, ["checkout", "-b", "feature/net-diff"]);
+        yield* writeTextFile(path.join(tmp, "feature.ts"), "one\ntwo\nthree\n");
+        yield* git(tmp, ["add", "feature.ts"]);
+        yield* git(tmp, ["commit", "-m", "add feature"]);
+
+        // Working tree is clean, but the committed change shows up in netDiff vs base.
+        const committed = yield* core.statusDetails(tmp);
+        expect(committed.workingTree.insertions).toBe(0);
+        expect(committed.netDiff.insertions).toBe(3);
+        expect(committed.netDiff.deletions).toBe(0);
+
+        // Uncommitted edits stack on top of the committed total.
+        yield* writeTextFile(path.join(tmp, "feature.ts"), "one\ntwo\nthree\nfour\n");
+        const dirty = yield* core.statusDetails(tmp);
+        expect(dirty.workingTree.insertions).toBe(1);
+        expect(dirty.netDiff.insertions).toBe(4);
       }),
     );
 

@@ -152,7 +152,7 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import { useStore } from "../store";
-import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
+import { useThreadEffectiveCwd } from "../hooks/useThreadEffectiveCwd";
 import { RenameThreadDialog } from "./RenameThreadDialog";
 import { getThreadFromState } from "../threadDerivation";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -1091,11 +1091,19 @@ export default function ChatView({
   const resolvedThreadWorktreePath = isServerThread
     ? (activeThread?.worktreePath ?? null)
     : (draftThread?.worktreePath ?? null);
-  const diffEnvironmentState = resolveDiffEnvironmentState({
+  const { manualCwd: manualDiffCwd, autoWorktreePath } = useThreadEffectiveCwd({
+    threadId: activeThread?.id ?? null,
     projectCwd: activeProject?.cwd ?? null,
-    envMode: resolvedThreadEnvMode,
-    worktreePath: resolvedThreadWorktreePath,
+    threadWorktreePath: resolvedThreadWorktreePath,
   });
+  // A manual worktree pick is a concrete cwd, so the thread is never "pending".
+  const diffEnvironmentState = manualDiffCwd
+    ? { pending: false, cwd: manualDiffCwd, disabledReason: null }
+    : resolveDiffEnvironmentState({
+        projectCwd: activeProject?.cwd ?? null,
+        envMode: resolvedThreadEnvMode,
+        worktreePath: resolvedThreadWorktreePath,
+      });
   const diffEnvironmentPending = diffEnvironmentState.pending;
   const diffDisabledReason = diffEnvironmentState.disabledReason;
   const activeThreadAssociatedWorktree = useMemo(
@@ -1973,30 +1981,19 @@ export default function ChatView({
     latestTurnSettled,
     timelineEntries,
   ]);
-  // When Claude is running in a terminal and operates inside a worktree it
-  // created itself, override the workspace cwd so the header git-status
-  // totals (and other cwd-derived surfaces) reflect that worktree instead of
-  // the shared project root — otherwise every terminal thread shows the same
-  // numbers from projectCwd.
-  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
-    activeThread?.id ? (store.cwdByThreadId[activeThread.id] ?? null) : null,
-  );
-  const projectCwd = activeProject?.cwd ?? null;
-  const claudeEffectiveWorktreePath =
-    resolvedThreadWorktreePath === null &&
-    claudeReportedCwd !== null &&
-    projectCwd !== null &&
-    claudeReportedCwd !== projectCwd &&
-    !claudeReportedCwd.startsWith(`${projectCwd}/`)
-      ? claudeReportedCwd
-      : resolvedThreadWorktreePath;
-  const threadWorkspaceCwd = activeProject
-    ? resolveSharedThreadWorkspaceCwd({
-        projectCwd: activeProject.cwd,
-        envMode: resolvedThreadEnvMode,
-        worktreePath: claudeEffectiveWorktreePath,
-      })
-    : null;
+  // A manual worktree pick wins outright; otherwise resolve from the thread's
+  // worktree (with an ad-hoc agent-created worktree folded in via the hook), so
+  // the header git-status totals and other cwd-derived surfaces reflect the
+  // right worktree instead of the shared project root.
+  const threadWorkspaceCwd =
+    manualDiffCwd ??
+    (activeProject
+      ? resolveSharedThreadWorkspaceCwd({
+          projectCwd: activeProject.cwd,
+          envMode: resolvedThreadEnvMode,
+          worktreePath: autoWorktreePath,
+        })
+      : null);
   const gitCwd = threadWorkspaceCwd;
   const showGitActions = !isHomeChatContainer || Boolean(resolvedThreadWorktreePath);
   const gitBranchSourceCwd = activeProject

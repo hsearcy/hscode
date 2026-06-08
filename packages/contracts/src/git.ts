@@ -251,6 +251,14 @@ export const GitStatusResult = Schema.Struct({
     insertions: NonNegativeInt,
     deletions: NonNegativeInt,
   }),
+  // Net diff vs the base branch's merge-base: committed branch changes plus
+  // uncommitted working-tree changes. Collapses to the working-tree totals on a
+  // base-less branch (e.g. main). Drives the header diff badge so it reflects a
+  // worktree's full change set even when its work is already committed.
+  netDiff: Schema.Struct({
+    insertions: NonNegativeInt,
+    deletions: NonNegativeInt,
+  }),
   hasUpstream: Schema.Boolean,
   aheadCount: NonNegativeInt,
   behindCount: NonNegativeInt,
@@ -263,8 +271,21 @@ export const GitReadWorkingTreeDiffResult = Schema.Struct({
 });
 export type GitReadWorkingTreeDiffResult = typeof GitReadWorkingTreeDiffResult.Type;
 
+// A checked-out worktree of the repo. `branch` is null for detached-HEAD
+// worktrees (e.g. HS Code's ad-hoc detached worktrees) — which is exactly why
+// the diff panel's worktree switcher consumes this list directly instead of
+// deriving worktrees from the branch list (detached ones have no branch entry).
+// Entries arrive sorted most-recently-modified first.
+export const GitWorktreeListEntry = Schema.Struct({
+  path: TrimmedNonEmptyStringSchema,
+  branch: Schema.NullOr(TrimmedNonEmptyStringSchema),
+  head: Schema.NullOr(TrimmedNonEmptyStringSchema),
+});
+export type GitWorktreeListEntry = typeof GitWorktreeListEntry.Type;
+
 export const GitListBranchesResult = Schema.Struct({
   branches: Schema.Array(GitBranch),
+  worktrees: Schema.Array(GitWorktreeListEntry),
   isRepo: Schema.Boolean,
   hasOriginRemote: Schema.Boolean,
 });

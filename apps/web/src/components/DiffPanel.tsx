@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { ThreadId, TurnId } from "@t3tools/contracts";
 import { FaPlusMinus } from "react-icons/fa6";
+import { GoGitBranch } from "react-icons/go";
 import { LuWrapText } from "react-icons/lu";
 import {
   CheckIcon,
@@ -45,7 +46,7 @@ import {
 import { resolveDiffEnvironmentState } from "../lib/threadEnvironment";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useStore } from "../store";
-import { useClaudeSessionMetaStore } from "../claudeSessionMetaStore";
+import { useThreadEffectiveCwd } from "../hooks/useThreadEffectiveCwd";
 import { createProjectSelector, createThreadSelector } from "../storeSelectors";
 import { getProviderStartOptions, useAppSettings } from "../appSettings";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -54,6 +55,15 @@ import ChatMarkdown from "./ChatMarkdown";
 import { resolveDiffPanelThread } from "./DiffPanel.logic";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { Button } from "./ui/button";
+import {
+  Menu,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuTrigger,
+} from "./ui/menu";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import { FileEntryIcon } from "./chat/FileEntryIcon";
 import { type SplitViewPanePanelState } from "../splitViewStore";
@@ -200,6 +210,16 @@ function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
   return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
 }
 
+// Trim a worktree path to its last couple of segments so the switcher menu stays
+// legible while still disambiguating sibling worktrees.
+function shortenWorktreePath(worktreePath: string): string {
+  const segments = worktreePath.split("/").filter(Boolean);
+  if (segments.length <= 2) {
+    return worktreePath;
+  }
+  return `…/${segments.slice(-2).join("/")}`;
+}
+
 interface DiffPanelProps {
   mode?: DiffPanelMode;
   threadId?: ThreadId | null;
@@ -269,64 +289,99 @@ export default function DiffPanel({
     serverThread?.envMode ?? draftThread?.envMode ?? activeThread?.envMode;
   const resolvedThreadWorktreePath =
     serverThread?.worktreePath ?? draftThread?.worktreePath ?? activeThread?.worktreePath ?? null;
-  // When Claude operates inside a worktree it created itself (e.g. via Agent
-  // isolation: "worktree" or `git worktree add`), the hook surfaces the
-  // directory of the most recent file edit. Only override when that path
-  // falls outside the project root tree — otherwise it's just a deep
-  // subdirectory of the project. Git resolves the surrounding worktree root
-  // from any path inside it, so feeding the parent dir into the diff queries
-  // is enough.
-  const claudeReportedCwd = useClaudeSessionMetaStore((store) =>
-    activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
-  );
   const projectCwd = activeProject?.cwd ?? null;
-  const claudeReportedCwdIsOutsideProject =
-    claudeReportedCwd !== null &&
-    projectCwd !== null &&
-    claudeReportedCwd !== projectCwd &&
-    !claudeReportedCwd.startsWith(`${projectCwd}/`);
-  const claudeEffectiveWorktreePath =
-    resolvedThreadWorktreePath === null && claudeReportedCwdIsOutsideProject
-      ? claudeReportedCwd
-      : resolvedThreadWorktreePath;
-  const diffEnvironmentState = resolveDiffEnvironmentState({
+  // Shared resolution of the thread's effective cwd (manual switcher pick >
+  // ad-hoc agent worktree > thread worktree). See useThreadEffectiveCwd.
+  const {
+    manualCwd,
+    setManualCwd,
+    agentReportedCwd,
+    clearAgentReportedCwd,
+    agentReportedCwdIsOutsideProject,
+    autoWorktreePath,
+  } = useThreadEffectiveCwd({
+    threadId: activeThreadId,
     projectCwd,
-    envMode: resolvedThreadEnvMode,
-    worktreePath: claudeEffectiveWorktreePath,
+    threadWorktreePath: resolvedThreadWorktreePath,
   });
+  const diffEnvironmentState = manualCwd
+    ? { pending: false, cwd: manualCwd, disabledReason: null }
+    : resolveDiffEnvironmentState({
+        projectCwd,
+        envMode: resolvedThreadEnvMode,
+        worktreePath: autoWorktreePath,
+      });
   const diffEnvironmentPending = diffEnvironmentState.pending;
   const activeCwd = diffEnvironmentState.cwd;
   const gitBranchesQuery = useQuery(gitBranchesQueryOptions(activeCwd ?? null));
   const isGitRepo = gitBranchesQuery.data?.isRepo ?? true;
 
+  // Enumerate switchable worktrees from the project root rather than activeCwd:
+  // `git worktree list` from any worktree reports them all, and the project root
+  // is always a valid repo — so the switcher stays populated even when the
+  // panel's current target detection has gone wrong (the case this UI is for).
+  const projectBranchesQuery = useQuery(gitBranchesQueryOptions(projectCwd));
+  // Build the switcher from the worktree list (server-sorted most-recent-first),
+  // not the branch list: detached-HEAD worktrees have no branch entry, so a
+  // branch-derived list would silently drop them.
+  const worktreeOptions = useMemo(() => {
+    const branches = projectBranchesQuery.data?.branches ?? [];
+    const defaultBranchName =
+      branches.find((branch) => branch.isDefault && !branch.isRemote)?.name ?? null;
+    return (projectBranchesQuery.data?.worktrees ?? []).map((worktree) => ({
+      worktreePath: worktree.path,
+      branch: worktree.branch,
+      head: worktree.head,
+      isDefault: worktree.branch !== null && worktree.branch === defaultBranchName,
+    }));
+  }, [projectBranchesQuery.data?.branches, projectBranchesQuery.data?.worktrees]);
+
   // If the active cwd was inherited from a stale claude-reported worktree
   // (e.g. Claude moved out of an ad-hoc worktree that has since been removed)
   // git will report this path is not a repo. Clear the override so cwd
   // resolution falls back to the thread's stored worktree / project root.
-  const clearClaudeReportedCwd = useClaudeSessionMetaStore((store) => store.setThreadCwd);
   useEffect(() => {
     if (
-      activeThreadId &&
-      claudeReportedCwdIsOutsideProject &&
-      claudeReportedCwd !== null &&
+      agentReportedCwdIsOutsideProject &&
+      agentReportedCwd !== null &&
       gitBranchesQuery.data?.isRepo === false
     ) {
-      clearClaudeReportedCwd(activeThreadId, null);
+      clearAgentReportedCwd();
     }
   }, [
-    activeThreadId,
-    claudeReportedCwd,
-    claudeReportedCwdIsOutsideProject,
-    clearClaudeReportedCwd,
+    agentReportedCwd,
+    agentReportedCwdIsOutsideProject,
+    clearAgentReportedCwd,
     gitBranchesQuery.data?.isRepo,
   ]);
 
-  const refreshDiffPanel = useCallback(() => {
-    if (activeThreadId && claudeReportedCwdIsOutsideProject) {
-      clearClaudeReportedCwd(activeThreadId, null);
+  // "Auto-detect" returns the panel to automatic worktree resolution and folds in
+  // the old refresh behavior (drop a stale agent-reported cwd, reload git data).
+  const selectAutoDetectDiffSource = useCallback(() => {
+    setManualCwd(null);
+    if (agentReportedCwdIsOutsideProject) {
+      clearAgentReportedCwd();
     }
     void invalidateGitQueries(queryClient);
-  }, [activeThreadId, claudeReportedCwdIsOutsideProject, clearClaudeReportedCwd, queryClient]);
+  }, [agentReportedCwdIsOutsideProject, clearAgentReportedCwd, queryClient, setManualCwd]);
+  const selectManualDiffSource = useCallback(
+    (worktreePath: string) => {
+      setManualCwd(worktreePath);
+    },
+    [setManualCwd],
+  );
+
+  // Drop a persisted manual pick once its worktree disappears from the repo so a
+  // removed worktree can't strand the panel on a dead path across reloads.
+  useEffect(() => {
+    if (!manualCwd || !projectBranchesQuery.isSuccess) {
+      return;
+    }
+    const stillExists = worktreeOptions.some((option) => option.worktreePath === manualCwd);
+    if (!stillExists) {
+      setManualCwd(null);
+    }
+  }, [manualCwd, projectBranchesQuery.isSuccess, setManualCwd, worktreeOptions]);
 
   const branchCommitsQuery = useQuery(
     gitBranchCommitsQueryOptions({
@@ -799,18 +854,80 @@ export default function DiffPanel({
             </Toggle>
           </>
         ) : null}
-        <button
-          type="button"
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--color-text-foreground-secondary)] transition-colors hover:bg-[var(--sidebar-accent)] hover:text-[var(--color-text-foreground)] [-webkit-app-region:no-drag]"
-          onClick={(event) => {
-            event.stopPropagation();
-            refreshDiffPanel();
+        <Menu
+          onOpenChange={(open) => {
+            if (open) void projectBranchesQuery.refetch();
           }}
-          aria-label="Refresh diff panel"
-          title="Refresh diff (re-detect worktree, reload commits)"
         >
-          <RefreshCwIcon className="size-3.5" />
-        </button>
+          <MenuTrigger
+            render={
+              <button
+                type="button"
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-transparent text-[var(--color-text-foreground-secondary)] transition-colors hover:bg-[var(--sidebar-accent)] hover:text-[var(--color-text-foreground)] [-webkit-app-region:no-drag]"
+                aria-label="Switch diff worktree"
+                title="Switch the worktree/branch this diff reads from"
+                onClick={(event) => event.stopPropagation()}
+              />
+            }
+          >
+            <GoGitBranch className="size-3.5" />
+          </MenuTrigger>
+          <MenuPopup
+            align="end"
+            side="bottom"
+            className="w-64 rounded-lg border-[color:var(--color-border)] bg-[var(--composer-surface)] shadow-lg"
+          >
+            <MenuGroup>
+              <MenuGroupLabel>Diff source</MenuGroupLabel>
+              <MenuItem onClick={selectAutoDetectDiffSource}>
+                <RefreshCwIcon />
+                <span className="flex-1">Auto-detect</span>
+                {manualCwd === null ? <CheckIcon className="size-3.5 text-success" /> : null}
+              </MenuItem>
+              {worktreeOptions.length > 0 ? <MenuSeparator className="mx-3 my-1" /> : null}
+              {worktreeOptions.map((option) => {
+                const isManual = manualCwd === option.worktreePath;
+                const isAutoTarget = manualCwd === null && activeCwd === option.worktreePath;
+                return (
+                  <MenuItem
+                    key={option.worktreePath}
+                    onClick={() => selectManualDiffSource(option.worktreePath)}
+                  >
+                    <GoGitBranch />
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="truncate font-medium">
+                        {option.branch ?? <span className="text-muted-foreground">detached</span>}
+                        {option.head ? (
+                          <span className="ml-1 font-mono text-[10px] font-normal text-muted-foreground">
+                            {option.head}
+                          </span>
+                        ) : null}
+                        {option.isDefault ? (
+                          <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+                            default
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="truncate text-[10px] text-muted-foreground">
+                        {shortenWorktreePath(option.worktreePath)}
+                      </span>
+                    </span>
+                    {isManual ? (
+                      <CheckIcon className="size-3.5 text-success" />
+                    ) : isAutoTarget ? (
+                      <span className="text-[10px] text-muted-foreground">current</span>
+                    ) : null}
+                  </MenuItem>
+                );
+              })}
+              {worktreeOptions.length === 0 && projectBranchesQuery.isSuccess ? (
+                <p className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                  No worktrees detected.
+                </p>
+              ) : null}
+            </MenuGroup>
+          </MenuPopup>
+        </Menu>
         {onClosePanel ? (
           <button
             type="button"

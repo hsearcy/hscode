@@ -155,9 +155,11 @@ export const ChatHeader = memo(function ChatHeader({
   const [preferredEditor] = usePreferredEditor(availableEditors);
   const EditorIcon = preferredEditor ? resolveEditorIcon(preferredEditor) : null;
   // Reuse the shared git status query so the diff toggle can show live totals
-  // without introducing a second API shape just for the header control.
+  // without introducing a second API shape just for the header control. Use the
+  // net-vs-base totals (committed + uncommitted) so the badge reflects a
+  // worktree's full change set even when its work is already committed.
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
-  const diffTotals = gitStatus?.workingTree ?? null;
+  const diffTotals = gitStatus?.netDiff ?? null;
   const showDiffTotals = (diffTotals?.insertions ?? 0) > 0 || (diffTotals?.deletions ?? 0) > 0;
   const isDisposableThread = useIsDisposableThread(activeThreadId);
 

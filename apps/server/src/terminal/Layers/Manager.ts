@@ -23,7 +23,7 @@ import {
   deriveTerminalTitleSignalIdentity,
   terminalCliKindFromValue,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
-  T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX,
+  T3CODE_TERMINAL_CLI_META_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_KIND_ENV_KEY,
   type TerminalActivityState,
   type TerminalAgentHookEventType,
@@ -608,21 +608,22 @@ function shouldStripOscSequence(content: string): boolean {
   return (
     /^(10|11|12);(?:\?|rgb:)/.test(content) ||
     content.startsWith(T3CODE_TERMINAL_HOOK_OSC_PREFIX) ||
-    content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)
+    content.startsWith(T3CODE_TERMINAL_CLI_META_OSC_PREFIX)
   );
 }
 
-interface ClaudeSessionMetaSignal {
-  sessionId: string;
+interface CliSessionMetaSignal {
+  cliKind: TerminalCliKind;
+  sessionId: string | null;
   summary: string | null;
   cwd: string | null;
 }
 
-function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSignal | null {
-  if (!content.startsWith(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX)) {
+function extractCliSessionMetaSignal(content: string): CliSessionMetaSignal | null {
+  if (!content.startsWith(T3CODE_TERMINAL_CLI_META_OSC_PREFIX)) {
     return null;
   }
-  const encoded = content.slice(T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX.length).trim();
+  const encoded = content.slice(T3CODE_TERMINAL_CLI_META_OSC_PREFIX.length).trim();
   if (encoded.length === 0) {
     return null;
   }
@@ -641,15 +642,26 @@ function extractClaudeSessionMetaSignal(content: string): ClaudeSessionMetaSigna
   if (typeof parsed !== "object" || parsed === null) {
     return null;
   }
-  const record = parsed as { sessionId?: unknown; summary?: unknown; cwd?: unknown };
-  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
-  if (sessionId.length === 0) {
+  const record = parsed as {
+    cliKind?: unknown;
+    sessionId?: unknown;
+    summary?: unknown;
+    cwd?: unknown;
+  };
+  const cliKind = record.cliKind === "codex" || record.cliKind === "claude" ? record.cliKind : null;
+  if (!cliKind) {
     return null;
   }
+  const sessionIdRaw = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
   const summaryRaw = typeof record.summary === "string" ? record.summary.trim() : "";
   const cwdRaw = typeof record.cwd === "string" ? record.cwd.trim() : "";
+  // Nothing actionable without at least a session id or a cwd to follow.
+  if (sessionIdRaw.length === 0 && cwdRaw.length === 0) {
+    return null;
+  }
   return {
-    sessionId,
+    cliKind,
+    sessionId: sessionIdRaw.length > 0 ? sessionIdRaw : null,
     summary: summaryRaw.length > 0 ? summaryRaw : null,
     cwd: cwdRaw.length > 0 ? cwdRaw : null,
   };
@@ -721,14 +733,14 @@ function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string;
   titleSignals: string[];
   hookEvents: TerminalAgentHookEventType[];
-  claudeMetaSignals: ClaudeSessionMetaSignal[];
+  cliMetaSignals: CliSessionMetaSignal[];
 } {
   const input = `${pendingControlSequence}${data}`;
   let visibleText = "";
   let index = 0;
   const titleSignals: string[] = [];
   const hookEvents: TerminalAgentHookEventType[] = [];
-  const claudeMetaSignals: ClaudeSessionMetaSignal[] = [];
+  const cliMetaSignals: CliSessionMetaSignal[] = [];
 
   const append = (value: string) => {
     visibleText += value;
@@ -745,7 +757,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
-          claudeMetaSignals,
+          cliMetaSignals,
         };
       }
 
@@ -769,7 +781,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
-            claudeMetaSignals,
+            cliMetaSignals,
           };
         }
         continue;
@@ -788,7 +800,7 @@ function sanitizeTerminalHistoryChunk(
             pendingControlSequence: input.slice(index),
             titleSignals,
             hookEvents,
-            claudeMetaSignals,
+            cliMetaSignals,
           };
         }
         const sequence = input.slice(index, terminatorIndex);
@@ -802,9 +814,9 @@ function sanitizeTerminalHistoryChunk(
           if (titleSignal) {
             titleSignals.push(titleSignal);
           }
-          const claudeMeta = extractClaudeSessionMetaSignal(content);
-          if (claudeMeta) {
-            claudeMetaSignals.push(claudeMeta);
+          const cliMeta = extractCliSessionMetaSignal(content);
+          if (cliMeta) {
+            cliMetaSignals.push(cliMeta);
           }
         }
         if (nextCodePoint !== 0x5d || !shouldStripOscSequence(content)) {
@@ -821,7 +833,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
-          claudeMetaSignals,
+          cliMetaSignals,
         };
       }
       append(input.slice(index, escapeSequenceEndIndex));
@@ -849,7 +861,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
-          claudeMetaSignals,
+          cliMetaSignals,
         };
       }
       continue;
@@ -863,7 +875,7 @@ function sanitizeTerminalHistoryChunk(
           pendingControlSequence: input.slice(index),
           titleSignals,
           hookEvents,
-          claudeMetaSignals,
+          cliMetaSignals,
         };
       }
       const sequence = input.slice(index, terminatorIndex);
@@ -872,9 +884,9 @@ function sanitizeTerminalHistoryChunk(
       if (hookEvent) {
         hookEvents.push(hookEvent);
       }
-      const claudeMeta = codePoint === 0x9d ? extractClaudeSessionMetaSignal(content) : null;
-      if (claudeMeta) {
-        claudeMetaSignals.push(claudeMeta);
+      const cliMeta = codePoint === 0x9d ? extractCliSessionMetaSignal(content) : null;
+      if (cliMeta) {
+        cliMetaSignals.push(cliMeta);
       }
       if (codePoint === 0x9d) {
         const titleSignal = extractOscTitle(content);
@@ -898,7 +910,7 @@ function sanitizeTerminalHistoryChunk(
     pendingControlSequence: "",
     titleSignals,
     hookEvents,
-    claudeMetaSignals,
+    cliMetaSignals,
   };
 }
 
@@ -1627,18 +1639,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
   }
 
-  private emitClaudeMetaSignal(
-    session: TerminalSessionState,
-    claudeMeta: ClaudeSessionMetaSignal,
-  ): void {
+  private emitCliMetaSignal(session: TerminalSessionState, cliMeta: CliSessionMetaSignal): void {
     this.emitEvent({
-      type: "claude-session",
+      type: "cli-session",
       threadId: session.threadId,
       terminalId: session.terminalId,
       createdAt: new Date().toISOString(),
-      sessionId: claudeMeta.sessionId,
-      summary: claudeMeta.summary,
-      cwd: claudeMeta.cwd,
+      cliKind: cliMeta.cliKind,
+      sessionId: cliMeta.sessionId,
+      summary: cliMeta.summary,
+      cwd: cliMeta.cwd,
     });
   }
 
@@ -1653,8 +1663,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (latestHookEvent) {
         this.applyHookEvent(session, latestHookEvent);
       }
-      for (const claudeMeta of sanitized.claudeMetaSignals) {
-        this.emitClaudeMetaSignal(session, claudeMeta);
+      for (const cliMeta of sanitized.cliMetaSignals) {
+        this.emitCliMetaSignal(session, cliMeta);
       }
     }
     const titleSignalCliKind =
@@ -2274,7 +2284,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   // Watch the managed hook event sink file and process appended OSC lines.
   // The hook appends one OSC sequence per line; we parse each through the
   // same sanitizer the PTY stream uses so Start/Stop/PermissionRequest and
-  // claude-session signals flow through identical handling.
+  // cli-session signals flow through identical handling.
   private startEventSinkWatcher(session: TerminalSessionState): void {
     const sinkPath = session.eventSinkPath;
     if (!sinkPath) return;
@@ -2327,8 +2337,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         if (latestHookEvent) {
           this.applyHookEvent(session, latestHookEvent);
         }
-        for (const claudeMeta of sanitized.claudeMetaSignals) {
-          this.emitClaudeMetaSignal(session, claudeMeta);
+        for (const cliMeta of sanitized.cliMetaSignals) {
+          this.emitCliMetaSignal(session, cliMeta);
         }
       }
     };

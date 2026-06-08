@@ -1474,6 +1474,7 @@ export const makeGitManager = Effect.gen(function* () {
       branch: details.branch,
       hasWorkingTreeChanges: details.hasWorkingTreeChanges,
       workingTree: details.workingTree,
+      netDiff: details.netDiff,
       hasUpstream: details.hasUpstream,
       aheadCount: details.aheadCount,
       behindCount: details.behindCount,

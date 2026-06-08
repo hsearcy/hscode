@@ -746,6 +746,7 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
     return {
       isRepo: true,
       hasOriginRemote: true,
+      worktrees: [],
       branches: [
         {
           name: "main",
@@ -765,6 +766,7 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
         insertions: 0,
         deletions: 0,
       },
+      netDiff: { insertions: 0, deletions: 0 },
       hasUpstream: true,
       aheadCount: 0,
       behindCount: 0,

@@ -75,7 +75,7 @@ import { resolvePathLinkTarget } from "~/terminal-links";
 import { readNativeApi } from "~/nativeApi";
 import { createThreadSelector } from "~/storeSelectors";
 import { useStore } from "~/store";
-import { useClaudeSessionMetaStore } from "~/claudeSessionMetaStore";
+import { useCliSessionMetaStore } from "~/cliSessionMetaStore";
 
 interface GitActionsControlProps {
   gitCwd: string | null;
@@ -327,24 +327,24 @@ export default function GitActionsControl({ gitCwd, activeThreadId }: GitActions
   // from a stale claude-reported worktree (e.g. an ad-hoc worktree Claude
   // created and later removed), clear that override so the next render
   // resolves back to the thread's stored worktree / project root.
-  const claudeReportedCwdForThread = useClaudeSessionMetaStore((store) =>
+  const agentReportedCwdForThread = useCliSessionMetaStore((store) =>
     activeThreadId ? (store.cwdByThreadId[activeThreadId] ?? null) : null,
   );
-  const clearClaudeReportedCwd = useClaudeSessionMetaStore((store) => store.setThreadCwd);
+  const clearAgentReportedCwd = useCliSessionMetaStore((store) => store.setThreadCwd);
   useEffect(() => {
     if (
       activeThreadId &&
       branchList?.isRepo === false &&
-      claudeReportedCwdForThread !== null &&
-      claudeReportedCwdForThread === gitCwd
+      agentReportedCwdForThread !== null &&
+      agentReportedCwdForThread === gitCwd
     ) {
-      clearClaudeReportedCwd(activeThreadId, null);
+      clearAgentReportedCwd(activeThreadId, null);
     }
   }, [
     activeThreadId,
     branchList?.isRepo,
-    claudeReportedCwdForThread,
-    clearClaudeReportedCwd,
+    agentReportedCwdForThread,
+    clearAgentReportedCwd,
     gitCwd,
   ]);
   const hasOriginRemote = branchList?.hasOriginRemote ?? false;

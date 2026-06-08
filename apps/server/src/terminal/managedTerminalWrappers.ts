@@ -9,7 +9,7 @@ import {
   defaultTerminalTitleForCliKind,
   managedTerminalCommandNameForCliKind,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
-  T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX,
+  T3CODE_TERMINAL_CLI_META_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_KIND_ENV_KEY,
   type TerminalAgentHookEventType,
   type TerminalCliKind,
@@ -139,6 +139,25 @@ _t3code_emit_osc() {
   printf '%b' "$_t3code_sequence"
 }
 
+# Encode {cliKind, sessionId, summary, cwd} and push it up the unified CLI meta
+# OSC channel. Shared by the Claude transcript scraper below and the Codex
+# CliMeta event the wrapper forwards from the TUI session log.
+_t3code_emit_cli_meta_payload() {
+  _t3code_meta_cli_kind="$1"
+  _t3code_meta_session_id="$2"
+  _t3code_meta_summary="$3"
+  _t3code_meta_cwd="$4"
+  if [ -z "$_t3code_meta_session_id" ] && [ -z "$_t3code_meta_cwd" ]; then
+    return
+  fi
+  if command -v base64 >/dev/null 2>&1; then
+    _t3code_payload="$(printf '{"cliKind":"%s","sessionId":"%s","summary":"%s","cwd":"%s"}' \\
+      "$_t3code_meta_cli_kind" "$_t3code_meta_session_id" "$_t3code_meta_summary" "$_t3code_meta_cwd" \\
+      | base64 | tr -d '\\n')"
+    _t3code_emit_osc "\\033]${T3CODE_TERMINAL_CLI_META_OSC_PREFIX}\${_t3code_payload}\\007"
+  fi
+}
+
 _t3code_emit_claude_meta() {
   _t3code_session_id="$(_t3code_extract_event session_id)"
   if [ -z "$_t3code_session_id" ]; then
@@ -179,11 +198,7 @@ _t3code_emit_claude_meta() {
   if [ -z "$_t3code_cwd" ]; then
     _t3code_cwd="$(_t3code_extract_event cwd)"
   fi
-  if command -v base64 >/dev/null 2>&1; then
-    _t3code_payload="$(printf '{"sessionId":"%s","summary":"%s","cwd":"%s"}' \\
-      "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd" | base64 | tr -d '\\n')"
-    _t3code_emit_osc "\\033]${T3CODE_TERMINAL_CLAUDE_META_OSC_PREFIX}\${_t3code_payload}\\007"
-  fi
+  _t3code_emit_cli_meta_payload "claude" "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd"
 }
 
 case "$_t3code_event" in
@@ -207,6 +222,17 @@ case "$_t3code_event" in
     ;;
   PermissionRequest|PreToolUse|Notification)
     _t3code_emit_osc '${buildHookOscSequence("PermissionRequest")}'
+    ;;
+  CliMeta)
+    # Forwarded by the Codex wrapper: carries the cwd of the most recent
+    # exec so the diff panel can follow Codex into worktrees it spawns.
+    _t3code_meta_cli_kind="$(_t3code_extract_event cli_kind)"
+    [ -n "$_t3code_meta_cli_kind" ] || _t3code_meta_cli_kind="codex"
+    _t3code_emit_cli_meta_payload \\
+      "$_t3code_meta_cli_kind" \\
+      "$(_t3code_extract_event session_id)" \\
+      "" \\
+      "$(_t3code_extract_event cwd)"
     ;;
 esac
 `;
@@ -265,12 +291,23 @@ function buildCodexWrapperScript(input: {
     '    _t3code_last_turn_id=""',
     '    _t3code_last_approval_id=""',
     '    _t3code_last_exec_call_id=""',
+    '    _t3code_last_cwd=""',
+    '    _t3code_session_id=""',
     "    _t3code_approval_fallback_seq=0",
     "",
     "    _t3code_emit_event() {",
     '      _t3code_event="$1"',
     `      _t3code_payload=$(printf '{"hook_event_name":"%s"}' "$_t3code_event")`,
     '      "$_t3code_notify" "$_t3code_payload" >/dev/null 2>&1 || true',
+    "    }",
+    "",
+    "    # Forward the cwd of Codex's most recent exec up the CLI meta channel so",
+    "    # the server can follow Codex into worktrees it created on its own.",
+    "    _t3code_emit_cwd() {",
+    '      _t3code_cwd_value="$1"',
+    '      [ -n "$_t3code_cwd_value" ] || return',
+    `      _t3code_meta_payload=$(printf '{"hook_event_name":"CliMeta","cli_kind":"codex","session_id":"%s","cwd":"%s"}' "$_t3code_session_id" "$_t3code_cwd_value")`,
+    '      "$_t3code_notify" "$_t3code_meta_payload" >/dev/null 2>&1 || true',
     "    }",
     "",
     "    _t3code_i=0",
@@ -284,6 +321,11 @@ function buildCodexWrapperScript(input: {
     "",
     '    tail -n 0 -F "$_t3code_log" 2>/dev/null | while IFS= read -r _t3code_line; do',
     '      case "$_t3code_line" in',
+    `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"session_configured"'*)`,
+    `          _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'"session_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
+    `          [ -n "$_t3code_new_session_id" ] || _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'"conversation_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
+    '          [ -z "$_t3code_new_session_id" ] || _t3code_session_id="$_t3code_new_session_id"',
+    "          ;;",
     `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"task_started"'*)`,
     `          _t3code_turn_id=$(printf '%s\n' "$_t3code_line" | awk -F'"turn_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
     '          [ -n "$_t3code_turn_id" ] || _t3code_turn_id="task_started"',
@@ -307,6 +349,11 @@ function buildCodexWrapperScript(input: {
     "          ;;",
     `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"exec_command_begin"'*)`,
     `          _t3code_exec_call_id=$(printf '%s\n' "$_t3code_line" | awk -F'"call_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
+    `          _t3code_exec_cwd=$(printf '%s\n' "$_t3code_line" | awk -F'"cwd":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
+    '          if [ -n "$_t3code_exec_cwd" ] && [ "$_t3code_exec_cwd" != "$_t3code_last_cwd" ]; then',
+    '            _t3code_last_cwd="$_t3code_exec_cwd"',
+    '            _t3code_emit_cwd "$_t3code_exec_cwd"',
+    "          fi",
     '          if [ -n "$_t3code_exec_call_id" ]; then',
     '            if [ "$_t3code_exec_call_id" != "$_t3code_last_exec_call_id" ]; then',
     '              _t3code_last_exec_call_id="$_t3code_exec_call_id"',

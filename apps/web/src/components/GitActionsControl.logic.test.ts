@@ -23,6 +23,7 @@ function status(overrides: Partial<GitStatusResult> = {}): GitStatusResult {
       insertions: 0,
       deletions: 0,
     },
+    netDiff: { insertions: 0, deletions: 0 },
     hasUpstream: true,
     aheadCount: 0,
     behindCount: 0,

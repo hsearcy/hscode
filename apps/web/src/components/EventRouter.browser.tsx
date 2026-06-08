@@ -221,6 +221,7 @@ function resolveWsRpc(tag: string): unknown {
     return {
       isRepo: true,
       hasOriginRemote: true,
+      worktrees: [],
       branches: [{ name: "main", current: true, isDefault: true, worktreePath: null }],
     };
   }
@@ -229,6 +230,7 @@ function resolveWsRpc(tag: string): unknown {
       branch: "main",
       hasWorkingTreeChanges: false,
       workingTree: { files: [], insertions: 0, deletions: 0 },
+      netDiff: { insertions: 0, deletions: 0 },
       hasUpstream: true,
       aheadCount: 0,
       behindCount: 0,

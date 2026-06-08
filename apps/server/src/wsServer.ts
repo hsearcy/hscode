@@ -1476,9 +1476,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     // so threads displayed as "Claude Code - dpcode" still get renamed by Claude summaries.
     return new RegExp(`^${claudeBase}\\s+[\\-\\u2013\\u2014]\\s+\\S`, "u").test(normalized);
   };
-  const applyClaudeSessionMeta = Effect.fnUntraced(function* (input: {
+  const applyCliSessionMeta = Effect.fnUntraced(function* (input: {
     threadId: string;
-    sessionId: string;
+    sessionId: string | null;
     summary: string | null;
   }) {
     const readModel = yield* orchestrationEngine.getReadModel();
@@ -1486,7 +1486,10 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     if (!thread) {
       return;
     }
-    const sessionIdChanged = thread.cliSessionId !== input.sessionId;
+    // Codex reports cwd without a stable session id; only adopt an id when one
+    // is actually present so we never clobber Claude's `--resume` token.
+    const nextSessionId = input.sessionId;
+    const sessionIdChanged = nextSessionId !== null && thread.cliSessionId !== nextSessionId;
     const trimmedSummary = input.summary?.trim() ?? "";
     const truncatedSummary =
       trimmedSummary.length > CLAUDE_SUMMARY_TITLE_MAX
@@ -1503,16 +1506,16 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       type: "thread.meta.update",
       commandId: CommandId.makeUnsafe(crypto.randomUUID()),
       threadId: ThreadId.makeUnsafe(input.threadId),
-      ...(sessionIdChanged ? { cliSessionId: input.sessionId } : {}),
+      ...(sessionIdChanged && nextSessionId !== null ? { cliSessionId: nextSessionId } : {}),
       ...(shouldUpdateTitle ? { title: truncatedSummary } : {}),
     });
   });
 
-  // Terminal Claude has no provider runtime turns, so the Review/Summary
-  // surfaces stay empty by default. Synthesize a turn lifecycle from terminal
-  // running-state transitions: when the first Claude terminal in a thread
-  // starts running we capture a baseline checkpoint; when the last one stops
-  // we capture the target checkpoint, diff, and dispatch the same
+  // Terminal CLIs (Claude and Codex) have no provider runtime turns, so the
+  // Review/Summary surfaces stay empty by default. Synthesize a turn lifecycle
+  // from terminal running-state transitions: when the first agent terminal in a
+  // thread starts running we capture a baseline checkpoint; when the last one
+  // stops we capture the target checkpoint, diff, and dispatch the same
   // `thread.turn.diff.complete` command CheckpointReactor would.
   const checkpointStore = yield* CheckpointStore;
   interface SyntheticTerminalTurn {
@@ -1522,8 +1525,8 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     readonly turnCount: number;
     readonly startedAt: string;
   }
-  const claudeRunningTerminalsByThreadId = new Map<string, Set<string>>();
-  const claudeReportedCwdByThreadId = new Map<string, string>();
+  const cliRunningTerminalsByThreadId = new Map<string, Set<string>>();
+  const cliReportedCwdByThreadId = new Map<string, string>();
   const pendingTerminalTurnByThreadId = new Map<string, SyntheticTerminalTurn>();
 
   // Capture must always run from the worktree root, not a deep subdirectory.
@@ -1551,7 +1554,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     // Prefer the cwd Claude reports through the OSC hook (which is the
     // directory of its most recent edit). Resolve to the surrounding worktree
     // root so capture covers the whole worktree consistently.
-    const reportedCwd = claudeReportedCwdByThreadId.get(threadId);
+    const reportedCwd = cliReportedCwdByThreadId.get(threadId);
     if (reportedCwd) {
       const toplevel = resolveGitToplevel(reportedCwd);
       if (toplevel) {
@@ -1594,7 +1597,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     logger.info("terminal turn begin", {
       threadId: input.threadId,
       cwd,
-      reportedCwd: claudeReportedCwdByThreadId.get(input.threadId) ?? null,
+      reportedCwd: cliReportedCwdByThreadId.get(input.threadId) ?? null,
     });
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.find((entry) => entry.id === input.threadId);
@@ -1643,7 +1646,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     }
     pendingTerminalTurnByThreadId.delete(input.threadId);
     // If the resolved worktree drifted between begin and complete (e.g.
-    // baseline was captured at projectCwd before any claude-session event,
+    // baseline was captured at projectCwd before any cli-session event,
     // then edits landed in a sibling worktree), the two refs would describe
     // unrelated trees and `git diff` would explode. Skip rather than dispatch
     // a misleading huge diff.
@@ -1729,10 +1732,12 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     readonly hasRunningSubprocess: boolean;
     readonly createdAt: string;
   }) => {
-    if (event.cliKind !== "claude") {
+    // Both Claude and Codex terminals get synthetic turn checkpoints; a bare
+    // shell (cliKind null) does not.
+    if (event.cliKind === null) {
       return;
     }
-    const runningSet = claudeRunningTerminalsByThreadId.get(event.threadId) ?? new Set<string>();
+    const runningSet = cliRunningTerminalsByThreadId.get(event.threadId) ?? new Set<string>();
     const wasEmpty = runningSet.size === 0;
     if (event.hasRunningSubprocess) {
       runningSet.add(event.terminalId);
@@ -1740,9 +1745,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       runningSet.delete(event.terminalId);
     }
     if (runningSet.size === 0) {
-      claudeRunningTerminalsByThreadId.delete(event.threadId);
+      cliRunningTerminalsByThreadId.delete(event.threadId);
     } else {
-      claudeRunningTerminalsByThreadId.set(event.threadId, runningSet);
+      cliRunningTerminalsByThreadId.set(event.threadId, runningSet);
     }
     if (wasEmpty && runningSet.size > 0) {
       void runPromise(
@@ -1763,13 +1768,13 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     (event) => void Effect.runPromise(pushBus.publishAll(WS_CHANNELS.terminalEvent, event)),
   );
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
-  const unsubscribeClaudeSessionEvents = yield* terminalManager.subscribe((event) => {
-    if (event.type === "claude-session") {
+  const unsubscribeCliSessionEvents = yield* terminalManager.subscribe((event) => {
+    if (event.type === "cli-session") {
       if (event.cwd) {
-        claudeReportedCwdByThreadId.set(event.threadId, event.cwd);
+        cliReportedCwdByThreadId.set(event.threadId, event.cwd);
       }
       void runPromise(
-        applyClaudeSessionMeta({
+        applyCliSessionMeta({
           threadId: event.threadId,
           sessionId: event.sessionId,
           summary: event.summary,
@@ -1787,7 +1792,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       });
     }
   });
-  yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeClaudeSessionEvents()));
+  yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeCliSessionEvents()));
   yield* readiness.markTerminalSubscriptionsReady;
 
   yield* Effect.addFinalizer(() =>

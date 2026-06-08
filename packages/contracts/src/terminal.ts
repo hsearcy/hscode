@@ -147,10 +147,15 @@ const TerminalActivityEvent = Schema.Struct({
   ),
 });
 
-const TerminalClaudeSessionEvent = Schema.Struct({
+// Emitted whenever a managed CLI (Claude or Codex) reports its live session
+// identity and the working directory of its most recent edit. `sessionId` is
+// nullable because Codex surfaces a cwd update before (or without) a stable
+// session id, and only Claude needs the id for `--resume`.
+const TerminalCliSessionEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
-  type: Schema.Literal("claude-session"),
-  sessionId: Schema.String.check(Schema.isNonEmpty()),
+  type: Schema.Literal("cli-session"),
+  cliKind: Schema.Union([Schema.Literal("codex"), Schema.Literal("claude")]),
+  sessionId: Schema.NullOr(Schema.String.check(Schema.isNonEmpty())),
   summary: Schema.NullOr(Schema.String),
   cwd: Schema.NullOr(Schema.String),
 });
@@ -163,6 +168,6 @@ export const TerminalEvent = Schema.Union([
   TerminalClearedEvent,
   TerminalRestartedEvent,
   TerminalActivityEvent,
-  TerminalClaudeSessionEvent,
+  TerminalCliSessionEvent,
 ]);
 export type TerminalEvent = typeof TerminalEvent.Type;
