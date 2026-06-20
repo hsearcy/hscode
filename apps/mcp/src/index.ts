@@ -34,9 +34,11 @@ import {
   gitAvailable,
   isDirEmptyOrMissing,
   isGitRepo,
+  isInside,
   normalizeWorkspacePath,
   parseGitRepoUrl,
   resolveCloneTarget,
+  scrubCredentials,
 } from "./projects.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
@@ -1079,12 +1081,16 @@ function registerTools(server: McpServer): void {
     "register_project",
     {
       description:
-        "Register an existing local directory as an HS Code project so threads can be started in it. The directory must already exist on this machine (use `clone_or_add_github_project` to clone a GitHub repo first). Idempotent: if a project is already registered at that path, the existing one is returned unchanged. After registering, use `start_thread` to launch Claude/Codex in it.",
+        "Register an existing local directory as an HS Code project so threads can be started in it. The directory must already exist on this machine (use `clone_or_add_github_project` to clone a GitHub repo first). " +
+        "Safe by default: `workspacePath` must live inside the projects root (see `projectsRoot` from `list_projects`); registering a directory outside it — which would let future `start_thread` calls run there — requires explicitly passing `allowOutsideProjectsRoot:true`. " +
+        "Idempotent: if a project is already registered at that path, the existing one is returned unchanged. After registering, use `start_thread` to launch Claude/Codex in it.",
       inputSchema: {
         workspacePath: z
           .string()
           .min(1)
-          .describe("Absolute path to the project directory on the HS Code machine."),
+          .describe(
+            "Absolute path to the project directory on the HS Code machine. Must be inside the projects root unless allowOutsideProjectsRoot is set.",
+          ),
         title: z
           .string()
           .optional()
@@ -1099,6 +1105,12 @@ function registerTools(server: McpServer): void {
           .describe(
             "If true, allow registering a path that doesn't exist yet (server creates it). Default false.",
           ),
+        allowOutsideProjectsRoot: z
+          .boolean()
+          .optional()
+          .describe(
+            "Escape hatch: permit a workspacePath outside the projects root. Default false. Only set this for a path you have deliberately chosen — it lets agents run in arbitrary directories on the machine.",
+          ),
       },
     },
     async (args: {
@@ -1106,10 +1118,20 @@ function registerTools(server: McpServer): void {
       title?: string;
       defaultProvider?: ProvisionProvider;
       createWorkspaceRootIfMissing?: boolean;
+      allowOutsideProjectsRoot?: boolean;
     }) => {
       const workspacePath = args.workspacePath.trim();
       if (!isAbsolute(workspacePath)) {
         throw new Error(`workspacePath must be an absolute path, got "${workspacePath}".`);
+      }
+      if (args.allowOutsideProjectsRoot !== true) {
+        const root = projectsRoot();
+        if (!isInside(root, workspacePath)) {
+          throw new Error(
+            `refusing to register a path outside the projects root (${root}): ${workspacePath}. ` +
+              "Pass allowOutsideProjectsRoot:true to override, or clone/place the project under the projects root.",
+          );
+        }
       }
       const createIfMissing = args.createWorkspaceRootIfMissing === true;
       if (!createIfMissing && !existsSync(workspacePath)) {
@@ -1176,8 +1198,10 @@ function registerTools(server: McpServer): void {
     }) => {
       const parsed = parseGitRepoUrl(args.repo);
       if (!parsed) {
+        // Scrub before echoing: a malformed URL can still carry a token
+        // (e.g. https://x-access-token:SECRET@github.com/...) and must never leak.
         throw new Error(
-          `could not parse "${args.repo}" as a GitHub repo. Use an https/ssh URL or "owner/repo".`,
+          `could not parse "${scrubCredentials(args.repo)}" as a GitHub repo. Use an https/ssh URL or "owner/repo".`,
         );
       }
       const root = projectsRoot();

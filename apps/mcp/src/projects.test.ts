@@ -59,6 +59,12 @@ describe("parseGitRepoUrl", () => {
     expect(parseGitRepoUrl("not a repo at all")).toBeNull();
     expect(parseGitRepoUrl("https://github.com/")).toBeNull();
   });
+
+  it("returns null for a malformed credential-bearing URL (no path)", () => {
+    // The clone tool scrubs args.repo before echoing it in the parse-failure
+    // error; this guards the input that triggers that path.
+    expect(parseGitRepoUrl("https://x-access-token:ghp_secret@github.com/")).toBeNull();
+  });
 });
 
 describe("scrubCredentials", () => {
@@ -77,6 +83,14 @@ describe("scrubCredentials", () => {
     expect(scrubCredentials("https://github.com/owner/repo.git")).toBe(
       "https://github.com/owner/repo.git",
     );
+  });
+
+  it("scrubs a malformed credential-bearing repo string (parse-failure echo path)", () => {
+    const malformed = "https://x-access-token:ghp_secret@github.com/";
+    const scrubbed = scrubCredentials(malformed);
+    expect(scrubbed).not.toContain("ghp_secret");
+    expect(scrubbed).not.toContain("x-access-token");
+    expect(scrubbed).toBe("https://github.com/");
   });
 });
 
