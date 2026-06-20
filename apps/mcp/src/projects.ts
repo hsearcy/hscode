@@ -126,16 +126,21 @@ export function isInside(parent: string, child: string): boolean {
 
 /**
  * Pick the default directory new repos get cloned into. Preference order:
- *   1. An explicit override (HSCODE_PROJECTS_ROOT) — resolved to absolute.
- *   2. The directory that already holds the most registered project workspaces
+ *   1. The value configured in Settings (persisted server-side) — `configuredRoot`.
+ *   2. An explicit override (HSCODE_PROJECTS_ROOT) — resolved to absolute.
+ *   3. The directory that already holds the most registered project workspaces
  *      (so clones land alongside the user's existing repos).
- *   3. `<home>/git`.
+ *   4. `<home>/git`.
  */
 export function deriveProjectsRoot(opts: {
+  configuredRoot?: string | null | undefined;
   envRoot?: string | undefined;
   existingWorkspaceRoots: readonly string[];
   home: string;
 }): string {
+  const configured = opts.configuredRoot?.trim();
+  if (configured) return normalizeWorkspacePath(configured);
+
   const env = opts.envRoot?.trim();
   if (env) return normalizeWorkspacePath(env);
 

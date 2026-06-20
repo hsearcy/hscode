@@ -86,10 +86,12 @@ function findProjectByWorkspaceRoot(root: string): ProjectRow | null {
   return null;
 }
 
-// Resolve the default directory clones land in: HSCODE_PROJECTS_ROOT, else the
-// parent that already holds the most registered projects, else ~/git.
+// Resolve the default directory clones land in: the Settings-configured value
+// (app_config table) wins, then HSCODE_PROJECTS_ROOT, then the parent that
+// already holds the most registered projects, then ~/git.
 function projectsRoot(): string {
   return deriveProjectsRoot({
+    configuredRoot: db.getAppConfig("projectsRoot"),
     envRoot: process.env.HSCODE_PROJECTS_ROOT,
     existingWorkspaceRoots: db.listProjects({ limit: 1000 }).map((p) => p.workspaceRoot),
     home: homedir(),

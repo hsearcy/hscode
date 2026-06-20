@@ -1,5 +1,11 @@
 import { Schema } from "effect";
-import { IsoDateTime, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+} from "./baseSchemas";
 import { KeybindingRule, ResolvedKeybindingsConfig } from "./keybindings";
 import { EditorId } from "./editor";
 import { ProviderKind } from "./orchestration";
@@ -59,8 +65,24 @@ export const ServerConfig = Schema.Struct({
   issues: ServerConfigIssues,
   providers: ServerProviderStatuses,
   availableEditors: Schema.Array(EditorId),
+  // User-configured root directory new repos are cloned into (used by the MCP
+  // provisioning tools). Null/absent means "unset" — callers fall back to their
+  // own resolution (env var, heuristic, ~/git).
+  projectsRoot: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 export type ServerConfig = typeof ServerConfig.Type;
+
+// Set (or clear, when null/blank) the configured projects root. The trimmed
+// value is persisted server-side so the separate MCP process can read it.
+export const ServerSetProjectsRootInput = Schema.Struct({
+  projectsRoot: Schema.NullOr(TrimmedString),
+});
+export type ServerSetProjectsRootInput = typeof ServerSetProjectsRootInput.Type;
+
+export const ServerSetProjectsRootResult = Schema.Struct({
+  projectsRoot: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ServerSetProjectsRootResult = typeof ServerSetProjectsRootResult.Type;
 
 export const ServerManagedWorktree = Schema.Struct({
   path: TrimmedNonEmptyString,

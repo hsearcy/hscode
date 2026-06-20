@@ -124,6 +124,28 @@ describe("isInside", () => {
 });
 
 describe("deriveProjectsRoot", () => {
+  it("honors the Settings-configured root above all else", () => {
+    expect(
+      deriveProjectsRoot({
+        configuredRoot: "/srv/configured/",
+        envRoot: "/srv/env",
+        existingWorkspaceRoots: ["/home/u/git/a", "/home/u/git/b"],
+        home: "/home/u",
+      }),
+    ).toBe("/srv/configured");
+  });
+
+  it("falls through a blank configured root to the env override", () => {
+    expect(
+      deriveProjectsRoot({
+        configuredRoot: "   ",
+        envRoot: "/srv/env",
+        existingWorkspaceRoots: [],
+        home: "/home/u",
+      }),
+    ).toBe("/srv/env");
+  });
+
   it("honors an explicit env override", () => {
     expect(
       deriveProjectsRoot({

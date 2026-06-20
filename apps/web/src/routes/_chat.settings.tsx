@@ -287,6 +287,60 @@ function normalizeManagedWorktreePath(value: string | null | undefined): string 
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
+// Server-backed setting (persisted in state.sqlite, not localStorage) so the
+// separate hscode-mcp process can read it when provisioning new repos.
+function ProjectsRootSetting() {
+  const queryClient = useQueryClient();
+  const configQuery = useQuery(serverConfigQueryOptions());
+  const serverValue = configQuery.data?.projectsRoot ?? "";
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = draft ?? serverValue;
+  const dirty = draft !== null && draft.trim() !== serverValue.trim();
+
+  const save = useCallback(async () => {
+    const api = readNativeApi() ?? ensureNativeApi();
+    if (!api) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = value.trim();
+      await api.server.setProjectsRoot({ projectsRoot: next.length > 0 ? next : null });
+      await queryClient.invalidateQueries({ queryKey: serverQueryKeys.config() });
+      setDraft(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save projects root.");
+    } finally {
+      setSaving(false);
+    }
+  }, [queryClient, value]);
+
+  return (
+    <SettingsRow
+      title="Projects root"
+      description="Directory new repositories are cloned into when an agent provisions a project via MCP. Leave blank to auto-detect (alongside your existing projects, or ~/git)."
+    >
+      <div className="mt-3 space-y-1.5">
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Input
+            value={value}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="/home/you/git"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <Button onClick={() => void save()} disabled={!dirty || saving}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+        {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      </div>
+    </SettingsRow>
+  );
+}
+
 // ── Route screen ───────────────────────────────────────────────────────────
 
 function SettingsRouteView() {
@@ -979,6 +1033,7 @@ function SettingsRouteView() {
               </Select>
             }
           />
+          <ProjectsRootSetting />
         </div>
       </SettingsSection>
 

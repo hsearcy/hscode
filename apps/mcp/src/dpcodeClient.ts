@@ -178,6 +178,21 @@ export class DpcodeDb {
     }));
   }
 
+  // Read a shared app_config value (written by the server via the
+  // server.setProjectsRoot WS method). Returns null when unset, or when the
+  // table doesn't exist yet (older DB the server hasn't migrated) — callers
+  // fall back to their own resolution.
+  getAppConfig(key: string): string | null {
+    try {
+      const row = this.db
+        .query("SELECT value FROM app_config WHERE key = $key")
+        .get({ $key: key }) as { value?: unknown } | null;
+      return row && row.value != null ? String(row.value) : null;
+    } catch {
+      return null;
+    }
+  }
+
   findProjects(query: string, limit = 5): ProjectRow[] {
     const sql = `
       SELECT project_id, title, workspace_root

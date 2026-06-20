@@ -9,6 +9,7 @@ import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore";
 import { ProviderSessionRuntimeRepositoryLive } from "./persistence/Layers/ProviderSessionRuntime";
 import { ProjectionThreadRepositoryLive } from "./persistence/Layers/ProjectionThreads";
+import { AppConfigRepositoryLive } from "./persistence/Layers/AppConfig";
 import { OrchestrationEngineLive } from "./orchestration/Layers/OrchestrationEngine";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor";
@@ -136,6 +137,7 @@ export function makeServerRuntimeServicesLayer() {
     checkpointDiffQueryLayer,
     RuntimeReceiptBusLive,
     ProjectionThreadRepositoryLive,
+    AppConfigRepositoryLive,
   );
   const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
     Layer.provideMerge(runtimeServicesLayer),
