@@ -454,6 +454,55 @@ function registerTools(server: McpServer): void {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (server.registerTool as any)(
+    "interrupt",
+    {
+      description:
+        "Send an interrupt (Ctrl+C, byte \\x03) to an HS Code thread's terminal — equivalent to pressing Ctrl+C in the CLI. Use this to cancel the agent's in-progress turn, dismiss an interactive prompt, or stop a long-running command. By default sends a single Ctrl+C; set `count` higher to send several in a row (some CLIs require a double Ctrl+C to exit). This sends a signal-style control byte, not chat text — to type a message use `send_input` instead.",
+      inputSchema: {
+        thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .optional()
+          .describe(
+            "How many Ctrl+C bytes to send (default 1). Use 2 for CLIs that need a double interrupt to exit.",
+          ),
+      },
+    },
+    async (args: { thread: string; count?: number }) => {
+      const row = resolveThread(args.thread);
+      // Ensure the terminal session is alive (server will resume the CLI if needed).
+      await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+      });
+      const count = args.count ?? 1;
+      const data = "\x03".repeat(count);
+      await ws.writeTerminal({ threadId: row.threadId, data });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                threadId: row.threadId,
+                interrupts: count,
+                bytesSent: Buffer.byteLength(data, "utf8"),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
     "wait_for_attention",
     {
       description:
