@@ -6,13 +6,14 @@
 // API (terminal.open / terminal.write + terminal.event push).
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -26,6 +27,17 @@ import {
   type TerminalActivity,
   type ThreadRow,
 } from "./dpcodeClient.ts";
+import {
+  cloneRepo,
+  commandAvailable,
+  deriveProjectsRoot,
+  gitAvailable,
+  isDirEmptyOrMissing,
+  isGitRepo,
+  normalizeWorkspacePath,
+  parseGitRepoUrl,
+  resolveCloneTarget,
+} from "./projects.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.5",
@@ -46,6 +58,87 @@ function resolveProject(input: string): ProjectRow {
     );
   }
   return matches[0]!;
+}
+
+// ── Project provisioning ─────────────────────────────────────────────────
+
+type ProvisionProvider = "claude" | "codex";
+
+function providerKindFor(provider: ProvisionProvider): "claudeAgent" | "codex" {
+  return provider === "claude" ? "claudeAgent" : "codex";
+}
+
+function defaultModelSelectionFor(provider: ProvisionProvider) {
+  const kind = providerKindFor(provider);
+  return { provider: kind, model: DEFAULT_MODEL_BY_PROVIDER[kind] };
+}
+
+// Find an already-registered project whose workspace root matches `root`
+// (path-normalized), so registration is idempotent even if the caller passes a
+// trailing slash or a slightly different spelling of the same directory.
+function findProjectByWorkspaceRoot(root: string): ProjectRow | null {
+  const target = normalizeWorkspacePath(root);
+  for (const project of db.listProjects({ limit: 1000 })) {
+    if (normalizeWorkspacePath(project.workspaceRoot) === target) return project;
+  }
+  return null;
+}
+
+// Resolve the default directory clones land in: HSCODE_PROJECTS_ROOT, else the
+// parent that already holds the most registered projects, else ~/git.
+function projectsRoot(): string {
+  return deriveProjectsRoot({
+    envRoot: process.env.HSCODE_PROJECTS_ROOT,
+    existingWorkspaceRoots: db.listProjects({ limit: 1000 }).map((p) => p.workspaceRoot),
+    home: homedir(),
+  });
+}
+
+interface RegisterResult {
+  project: ProjectRow;
+  created: boolean;
+}
+
+// Register a project at `workspaceRoot` via the orchestration `project.create`
+// command, deduping against existing projects first and recovering gracefully
+// if the server reports a duplicate (projection lag race). The returned project
+// uses the id we generated; we don't block on the projection catching up.
+async function registerProject(opts: {
+  title: string;
+  workspaceRoot: string;
+  provider: ProvisionProvider;
+  createWorkspaceRootIfMissing: boolean;
+}): Promise<RegisterResult> {
+  const workspaceRoot = normalizeWorkspacePath(opts.workspaceRoot);
+  const existing = findProjectByWorkspaceRoot(workspaceRoot);
+  if (existing) return { project: existing, created: false };
+
+  const projectId = randomUUID();
+  const title = opts.title.trim() || workspaceRoot;
+  try {
+    await ws.dispatchOrchestrationCommand({
+      type: "project.create",
+      commandId: randomUUID(),
+      projectId,
+      kind: "project",
+      title,
+      workspaceRoot,
+      createWorkspaceRootIfMissing: opts.createWorkspaceRootIfMissing,
+      defaultModelSelection: defaultModelSelectionFor(opts.provider),
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    // The decider rejects a duplicate workspace root. If a project for this
+    // root already exists (e.g. registered moments ago, projection still
+    // catching up), recover it instead of surfacing the error.
+    const message = error instanceof Error ? error.message : String(error);
+    if (/already uses workspace root/i.test(message)) {
+      const recovered = findProjectByWorkspaceRoot(workspaceRoot);
+      if (recovered) return { project: recovered, created: false };
+    }
+    throw error instanceof Error ? error : new Error(message);
+  }
+  return { project: { projectId, title, workspaceRoot }, created: true };
 }
 
 const cfg = loadConfig();
@@ -932,6 +1025,213 @@ function registerTools(server: McpServer): void {
                       pid: terminal.pid,
                     }
                   : null,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "list_projects",
+    {
+      description:
+        "List the projects registered in HS Code (the workspaces you can start threads in). Use this FIRST to check whether a repo is already registered before cloning or registering it — match on `workspaceRoot` (the absolute local path) or `title`. Returns each project's projectId, title, and workspaceRoot, plus `providers` (which CLIs — claude/codex — are installed on this machine) and `projectsRoot` (the default directory new repos are cloned into).",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Optional substring filter against project title or workspace path."),
+        limit: z.number().int().min(1).max(500).optional().describe("Default 200."),
+      },
+    },
+    async (args: { query?: string; limit?: number }) => {
+      const projects = db.listProjects({ query: args.query, limit: args.limit });
+      const [claudeOk, codexOk] = await Promise.all([
+        commandAvailable("claude"),
+        commandAvailable("codex"),
+      ]);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                projects,
+                providers: { claude: claudeOk, codex: codexOk },
+                projectsRoot: projectsRoot(),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "register_project",
+    {
+      description:
+        "Register an existing local directory as an HS Code project so threads can be started in it. The directory must already exist on this machine (use `clone_or_add_github_project` to clone a GitHub repo first). Idempotent: if a project is already registered at that path, the existing one is returned unchanged. After registering, use `start_thread` to launch Claude/Codex in it.",
+      inputSchema: {
+        workspacePath: z
+          .string()
+          .min(1)
+          .describe("Absolute path to the project directory on the HS Code machine."),
+        title: z
+          .string()
+          .optional()
+          .describe("Display name. Defaults to the directory's base name."),
+        defaultProvider: z
+          .enum(["claude", "codex"])
+          .optional()
+          .describe("Default CLI for the project's model selection. Defaults to codex."),
+        createWorkspaceRootIfMissing: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, allow registering a path that doesn't exist yet (server creates it). Default false.",
+          ),
+      },
+    },
+    async (args: {
+      workspacePath: string;
+      title?: string;
+      defaultProvider?: ProvisionProvider;
+      createWorkspaceRootIfMissing?: boolean;
+    }) => {
+      const workspacePath = args.workspacePath.trim();
+      if (!isAbsolute(workspacePath)) {
+        throw new Error(`workspacePath must be an absolute path, got "${workspacePath}".`);
+      }
+      const createIfMissing = args.createWorkspaceRootIfMissing === true;
+      if (!createIfMissing && !existsSync(workspacePath)) {
+        throw new Error(
+          `directory does not exist: ${workspacePath}. Pass createWorkspaceRootIfMissing:true to create it, or clone the repo first.`,
+        );
+      }
+      const title = args.title?.trim() || basename(workspacePath);
+      const result = await registerProject({
+        title,
+        workspaceRoot: workspacePath,
+        provider: args.defaultProvider ?? "codex",
+        createWorkspaceRootIfMissing: createIfMissing,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              { ok: true, created: result.created, project: result.project },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "clone_or_add_github_project",
+    {
+      description:
+        "Make a GitHub repo available on the HS Code machine and register it as a project, end-to-end. Given a repo URL (https or ssh) or `owner/repo` shorthand, this clones it (if not already present) into the projects root and registers it as an HS Code project so you can immediately `start_thread` in it. Fully idempotent: if the project is already registered, or the directory already exists as a git checkout, it is reused instead of re-cloned. The clone target is always kept inside the projects root — path traversal is rejected, and credentials are never echoed back.",
+      inputSchema: {
+        repo: z
+          .string()
+          .min(1)
+          .describe(
+            'GitHub repo to clone: an https URL ("https://github.com/owner/repo"), ssh URL ("git@github.com:owner/repo.git"), or shorthand ("owner/repo"). Tokens embedded in the URL are stripped from all responses.',
+          ),
+        title: z
+          .string()
+          .optional()
+          .describe("Project display name. Defaults to the repository name."),
+        targetDir: z
+          .string()
+          .optional()
+          .describe(
+            "Subdirectory name (relative to the projects root) or absolute path inside it to clone into. Defaults to <projectsRoot>/<repoName>. Paths that escape the projects root are rejected.",
+          ),
+        defaultProvider: z
+          .enum(["claude", "codex"])
+          .optional()
+          .describe("Default CLI for the project's model selection. Defaults to codex."),
+      },
+    },
+    async (args: {
+      repo: string;
+      title?: string;
+      targetDir?: string;
+      defaultProvider?: ProvisionProvider;
+    }) => {
+      const parsed = parseGitRepoUrl(args.repo);
+      if (!parsed) {
+        throw new Error(
+          `could not parse "${args.repo}" as a GitHub repo. Use an https/ssh URL or "owner/repo".`,
+        );
+      }
+      const root = projectsRoot();
+      const targetDir = resolveCloneTarget({
+        root,
+        repoName: parsed.repoName,
+        targetDir: args.targetDir,
+      });
+      const provider = args.defaultProvider ?? "codex";
+      const title = args.title?.trim() || parsed.repoName;
+
+      // Idempotency #1: already registered at this exact path → reuse.
+      const already = findProjectByWorkspaceRoot(targetDir);
+      let cloned = false;
+      if (!already) {
+        if (isGitRepo(targetDir)) {
+          // Idempotency #2: directory already a git checkout → don't re-clone.
+          cloned = false;
+        } else if (!isDirEmptyOrMissing(targetDir)) {
+          throw new Error(
+            `target directory ${targetDir} already exists and is not a git checkout — refusing to overwrite. Pass a different targetDir.`,
+          );
+        } else {
+          if (!(await gitAvailable())) {
+            throw new Error("git is not available on the HS Code machine; cannot clone.");
+          }
+          const clone = await cloneRepo({ cloneUrl: parsed.cloneUrl, targetDir });
+          if (!clone.ok) {
+            throw new Error(`git clone failed: ${clone.error ?? "unknown error"}`);
+          }
+          cloned = true;
+        }
+      }
+
+      const result = already
+        ? { project: already, created: false }
+        : await registerProject({
+            title,
+            workspaceRoot: targetDir,
+            provider,
+            createWorkspaceRootIfMissing: false,
+          });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                cloned,
+                created: result.created,
+                repo: { name: parsed.repoName, slug: parsed.slug, cloneUrl: parsed.cloneUrl },
+                project: result.project,
               },
               null,
               2,
