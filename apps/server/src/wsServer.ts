@@ -123,6 +123,7 @@ import {
   type TerminalCliKind,
 } from "@t3tools/shared/terminalThreads";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
+import { AppConfigRepository } from "./persistence/Services/AppConfig.ts";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -584,6 +585,11 @@ function stripRequestTag<T extends { _tag: string }>(body: T) {
 const encodeWsResponse = Schema.encodeEffect(Schema.fromJsonString(WsResponse));
 const decodeWebSocketRequest = decodeJsonResult(WebSocketRequest);
 
+// app_config key for the user-configured projects root. The separate hscode-mcp
+// process reads this same key string directly from state.sqlite, so keep them
+// in sync (mirrored in apps/mcp/src/projects.ts).
+const APP_CONFIG_PROJECTS_ROOT_KEY = "projectsRoot";
+
 export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
   | ProjectionSnapshotQuery
@@ -594,7 +600,8 @@ export type ServerCoreRuntimeServices =
   | ProviderDiscoveryService
   | ProviderAdapterRegistry
   | ProviderHealth
-  | ProjectionThreadRepository;
+  | ProjectionThreadRepository
+  | AppConfigRepository;
 
 export type ServerRuntimeServices =
   | ServerCoreRuntimeServices
@@ -705,6 +712,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const providerDiscoveryService = yield* ProviderDiscoveryService;
   const providerAdapterRegistry = yield* ProviderAdapterRegistry;
   const projectionThreadRepository = yield* ProjectionThreadRepository;
+  const appConfig = yield* AppConfigRepository;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -2527,6 +2535,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.serverGetConfig:
         const keybindingsConfig = yield* keybindingsManager.loadConfigState;
         const providerStatuses = yield* providerHealth.getStatuses;
+        const projectsRootConfig = yield* appConfig.get(APP_CONFIG_PROJECTS_ROOT_KEY);
         return {
           cwd,
           homeDir,
@@ -2536,6 +2545,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           issues: keybindingsConfig.issues,
           providers: providerStatuses,
           availableEditors,
+          projectsRoot: Option.getOrNull(projectsRootConfig),
         };
 
       case WS_METHODS.serverRefreshProviders:
@@ -2578,6 +2588,22 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         const body = stripRequestTag(request.body);
         const keybindingsConfig = yield* keybindingsManager.upsertKeybindingRule(body);
         return { keybindings: keybindingsConfig, issues: [] };
+      }
+
+      case WS_METHODS.serverSetProjectsRoot: {
+        const body = stripRequestTag(request.body);
+        // Input is trimmed by the schema; a null/blank value clears the override.
+        const next = body.projectsRoot ?? "";
+        if (next.length === 0) {
+          yield* appConfig.delete(APP_CONFIG_PROJECTS_ROOT_KEY);
+          return { projectsRoot: null };
+        }
+        yield* appConfig.set({
+          key: APP_CONFIG_PROJECTS_ROOT_KEY,
+          value: next,
+          updatedAt: new Date().toISOString(),
+        });
+        return { projectsRoot: next };
       }
 
       case WS_METHODS.providerGetComposerCapabilities: {

@@ -45,7 +45,7 @@
       "name": "@t3tools/mcp",
       "version": "0.0.1",
       "bin": {
-        "dpcode-mcp": "./src/index.ts",
+        "hscode-mcp": "./src/index.ts",
       },
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
@@ -58,6 +58,7 @@
         "@types/node": "catalog:",
         "@types/ws": "^8.5.13",
         "typescript": "catalog:",
+        "vitest": "catalog:",
       },
     },
     "apps/server": {

@@ -150,6 +150,49 @@ export class DpcodeDb {
     }));
   }
 
+  // List registered (non-deleted) projects, optionally filtered by a substring
+  // against title/workspace path. Unlike findProjects, the query is optional —
+  // callers that need the full set (dedup / list_projects) omit it.
+  listProjects(
+    opts: { query?: string | undefined; limit?: number | undefined } = {},
+  ): ProjectRow[] {
+    const conditions = ["deleted_at IS NULL", "kind = 'project'"];
+    const params: Record<string, string | number> = {};
+    if (opts.query) {
+      conditions.push("(title LIKE $q OR workspace_root LIKE $q)");
+      params.$q = `%${opts.query}%`;
+    }
+    params.$limit = opts.limit ?? 200;
+    const sql = `
+      SELECT project_id, title, workspace_root
+      FROM projection_projects
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY updated_at DESC
+      LIMIT $limit
+    `;
+    const rows = this.db.query(sql).all(params) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      projectId: String(r.project_id),
+      title: String(r.title),
+      workspaceRoot: String(r.workspace_root),
+    }));
+  }
+
+  // Read a shared app_config value (written by the server via the
+  // server.setProjectsRoot WS method). Returns null when unset, or when the
+  // table doesn't exist yet (older DB the server hasn't migrated) — callers
+  // fall back to their own resolution.
+  getAppConfig(key: string): string | null {
+    try {
+      const row = this.db
+        .query("SELECT value FROM app_config WHERE key = $key")
+        .get({ $key: key }) as { value?: unknown } | null;
+      return row && row.value != null ? String(row.value) : null;
+    } catch {
+      return null;
+    }
+  }
+
   findProjects(query: string, limit = 5): ProjectRow[] {
     const sql = `
       SELECT project_id, title, workspace_root
