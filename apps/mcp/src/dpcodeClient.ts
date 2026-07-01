@@ -285,6 +285,7 @@ export class DpcodeWs {
   private pushHandlers: Set<PushHandler> = new Set();
   private connectPromise: Promise<void> | null = null;
   private activity = new Map<string, TerminalActivity>();
+  private reconnectTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly cfg: DpcodeConfig) {}
 
@@ -390,6 +391,45 @@ export class DpcodeWs {
   onPush(handler: PushHandler): () => void {
     this.pushHandlers.add(handler);
     return () => this.pushHandlers.delete(handler);
+  }
+
+  /** True while a live socket to the desktop backend is open. */
+  get connected(): boolean {
+    return this.ws !== null;
+  }
+
+  /**
+   * Keep a live connection to the desktop backend so server push events
+   * (terminal.event) keep flowing to onPush handlers across desktop/WSL
+   * restarts. `connect()` only runs on demand (startup + each RPC), so once the
+   * socket closes — or never opened because the MCP won a startup race against
+   * the backend — push delivery dies silently with nothing to revive it. This
+   * adds a low-frequency watcher that reconnects whenever the socket is down.
+   *
+   * Idempotent: safe to call more than once (e.g. on every subscribe). The
+   * timer is unref'd so it never keeps the process alive on its own.
+   */
+  enableAutoReconnect(intervalMs = 5000): void {
+    if (this.reconnectTimer) return;
+    const tick = () => {
+      if (this.ws) return; // Already connected; connect() is a no-op anyway.
+      // connect() de-dupes in-flight attempts and clears its cached promise on
+      // failure, so a rejected attempt simply retries on the next tick.
+      this.connect().catch(() => {
+        // Backend may not be up yet — stay quiet and retry next tick.
+      });
+    };
+    this.reconnectTimer = setInterval(tick, intervalMs);
+    if (typeof this.reconnectTimer.unref === "function") this.reconnectTimer.unref();
+    tick(); // Kick an immediate attempt instead of waiting a full interval.
+  }
+
+  /** Stop the auto-reconnect watcher started by {@link enableAutoReconnect}. */
+  disableAutoReconnect(): void {
+    if (this.reconnectTimer) {
+      clearInterval(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   getActivity(threadId: string, terminalId = "default"): TerminalActivity | null {

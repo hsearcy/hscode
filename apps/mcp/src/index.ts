@@ -6,14 +6,14 @@
 // API (terminal.open / terminal.write + terminal.event push).
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import {
   createServer as createHttpServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -40,6 +40,12 @@ import {
   resolveCloneTarget,
   scrubCredentials,
 } from "./projects.ts";
+import {
+  loadSubscriptions as loadSubscriptionsFromDisk,
+  type PersistedSubscription,
+  saveSubscriptions,
+  type ScreenScope,
+} from "./subscriptionStore.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.5",
@@ -157,8 +163,6 @@ const ws = new DpcodeWs(cfg);
 // read_thread/notify_on_idle), so newly created threads won't appear until
 // someone opens them.
 
-type ScreenScope = "off" | "tail" | "lastTurn";
-
 interface ThreadEventSubscription {
   id: string;
   url: string;
@@ -179,61 +183,21 @@ let pushHandlerInstalled = false;
 // (lastFiredAt) and timers are transient and reset on load.
 const SUBSCRIPTIONS_PATH = join(cfg.homeDir, "userdata", "mcp-subscriptions.json");
 
-interface PersistedSubscription {
-  id: string;
-  url: string;
-  headers: Record<string, string>;
-  states: Array<"running" | "attention" | "review">;
-  screenScope: ScreenScope;
-  minIntervalMs: number;
-}
-
 function persistSubscriptions(): void {
-  try {
-    mkdirSync(dirname(SUBSCRIPTIONS_PATH), { recursive: true });
-    const rows: PersistedSubscription[] = Array.from(subscriptions.values()).map((s) => ({
-      id: s.id,
-      url: s.url,
-      headers: s.headers,
-      states: s.states,
-      screenScope: s.screenScope,
-      minIntervalMs: s.minIntervalMs,
-    }));
-    writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(rows, null, 2));
-  } catch (err) {
-    console.error(
-      `[hscode-mcp] failed to persist subscriptions to ${SUBSCRIPTIONS_PATH}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
+  const rows: PersistedSubscription[] = Array.from(subscriptions.values()).map((s) => ({
+    id: s.id,
+    url: s.url,
+    headers: s.headers,
+    states: s.states,
+    screenScope: s.screenScope,
+    minIntervalMs: s.minIntervalMs,
+  }));
+  saveSubscriptions(SUBSCRIPTIONS_PATH, rows);
 }
 
 function loadSubscriptions(): number {
-  let raw: string;
-  try {
-    raw = readFileSync(SUBSCRIPTIONS_PATH, "utf8");
-  } catch {
-    return 0; // No file yet — first run.
-  }
-  let rows: unknown;
-  try {
-    rows = JSON.parse(raw);
-  } catch {
-    console.error(`[hscode-mcp] subscriptions file ${SUBSCRIPTIONS_PATH} is corrupt — ignoring.`);
-    return 0;
-  }
-  if (!Array.isArray(rows)) return 0;
-  for (const row of rows as PersistedSubscription[]) {
-    if (!row || typeof row.id !== "string" || typeof row.url !== "string") continue;
-    subscriptions.set(row.id, {
-      id: row.id,
-      url: row.url,
-      headers: row.headers ?? {},
-      states: row.states ?? ["review", "attention"],
-      screenScope: row.screenScope ?? "off",
-      minIntervalMs: typeof row.minIntervalMs === "number" ? row.minIntervalMs : 2000,
-      lastFiredAt: new Map(),
-    });
+  for (const row of loadSubscriptionsFromDisk(SUBSCRIPTIONS_PATH)) {
+    subscriptions.set(row.id, { ...row, lastFiredAt: new Map() });
   }
   return subscriptions.size;
 }
@@ -249,6 +213,11 @@ const pendingAttentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 function ensureGlobalPushHandler(): void {
   if (pushHandlerInstalled) return;
   pushHandlerInstalled = true;
+  // Keep the WS to the desktop backend alive while subscriptions are active.
+  // Without this, a restart race (MCP up before the backend) or a later
+  // desktop restart closes the socket with nothing to reopen it, so restored
+  // subscriptions stop delivering until someone manually re-subscribes.
+  ws.enableAutoReconnect();
   ws.onPush((channel, data) => {
     if (channel !== "terminal.event" || !data || typeof data !== "object") return;
     const ev = data as Record<string, unknown>;
@@ -789,7 +758,7 @@ function registerTools(server: McpServer): void {
     "subscribe_threads",
     {
       description:
-        'Register a webhook to receive a POST every time ANY HS Code thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the HS Code server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription lives in this MCP process\'s memory and is dropped on restart.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "threadTitle": "<thread title>",\n  "project": "<project name>",\n  "workspaceRoot": "<absolute path>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<assistant turn / tail, if screenScope != off>"\n}\n```',
+        'Register a webhook to receive a POST every time ANY HS Code thread\'s CLI reaches an idle state (turn complete / approval prompt). Use this when a remote orchestrator wants to be paged about every thread without polling. Returns a `subscriptionId` you can pass to `unsubscribe_threads`.\n\nCaveats:\n- Events only flow for terminals the HS Code server has opened. New threads created via `start_thread` automatically open their terminal; others remain silent until something (the web UI, another MCP call) opens them.\n- The subscription is persisted to disk and restored automatically when hscode-mcp restarts (e.g. after a WSL/desktop restart), so you do NOT need to re-subscribe. The MCP also auto-reconnects to the desktop backend, so delivery resumes once the backend is back up.\n- Only state TRANSITIONS fire — repeated activity events with the same agentState are suppressed.\n- By default `running` transitions are NOT forwarded (they fire on every turn start and produce noise). Pass `states: ["running", "review", "attention"]` if you really want them.\n- Per-thread throttle: each (thread, subscription) pair is rate-limited to one POST per `minIntervalMs` (default 2000 ms) to absorb tight loops where a subscriber\'s reply immediately triggers the next turn.\n\nWebhook body (POST, content-type application/json):\n```\n{\n  "subscriptionId": "<uuid>",\n  "threadId": "<uuid>",\n  "threadTitle": "<thread title>",\n  "project": "<project name>",\n  "workspaceRoot": "<absolute path>",\n  "agentState": "running" | "review" | "attention" | null,\n  "firedAt": "<iso>",\n  "activity": { ... raw activity event ... },\n  "screen": "<assistant turn / tail, if screenScope != off>"\n}\n```',
       inputSchema: {
         notifyUrl: z
           .string()

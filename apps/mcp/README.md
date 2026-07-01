@@ -28,6 +28,21 @@ monitor and drive every HS Code thread you have open.
 
 `thread` accepts either a thread UUID or a substring of the thread title.
 
+### Webhook subscription durability
+
+`subscribe_threads` registrations are durable: they are written to
+`$DPCODE_HOME/userdata/mcp-subscriptions.json` and restored automatically when
+hscode-mcp restarts (e.g. after a WSL or desktop restart). Remote orchestrators
+(Ares/Hermes) do **not** need to re-subscribe after a restart. To survive
+restarts, the MCP also auto-reconnects to the desktop backend whenever
+subscriptions are active, so webhook delivery resumes on its own once the
+backend is back up.
+
+Auth headers (e.g. `X-Gitlab-Token`) are stored in that file so the webhook can
+be replayed, but are never written to logs. Treat the file as a secret — it
+lives under `$DPCODE_HOME` alongside `state.sqlite`. `notify_on_idle` webhooks
+are one-shot and intentionally not persisted.
+
 ## Configuration
 
 Environment variables (names preserved across the HS Code rename so existing
