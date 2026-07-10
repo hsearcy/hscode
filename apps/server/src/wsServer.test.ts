@@ -2647,14 +2647,109 @@ describe("WebSocket Server", () => {
     expect(renamedThread?.title).toBe("git push");
   });
 
-  it("detaches terminal event listener on stop for injected manager", async () => {
+  it("tracks Codex-managed titles without overwriting a manual HS Code title", async () => {
+    const terminalManager = new MockTerminalManager();
+    server = await createTestServer({
+      cwd: "/test",
+      terminalManager,
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const [ws] = await connectAndAwaitWelcome(port);
+    connections.push(ws);
+
+    const workspaceRoot = makeTempDir("t3code-ws-codex-title-");
+    const createdAt = new Date().toISOString();
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "project.create",
+      commandId: "cmd-codex-title-project-create",
+      projectId: "project-codex-title",
+      title: "Codex Title Project",
+      workspaceRoot,
+      defaultModelSelection: {
+        provider: "codex",
+        model: "gpt-5-codex",
+      },
+      createdAt,
+    });
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.create",
+      commandId: "cmd-codex-title-thread-create",
+      threadId: "thread-codex-title",
+      projectId: "project-codex-title",
+      title: "Codex — hscode",
+      modelSelection: {
+        provider: "codex",
+        model: "gpt-5-codex",
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+
+    const emitCodexTitle = (summary: string) =>
+      terminalManager.emitEvent({
+        type: "cli-session",
+        threadId: "thread-codex-title",
+        terminalId: DEFAULT_TERMINAL_ID,
+        createdAt: new Date().toISOString(),
+        cliKind: "codex",
+        sessionId: "codex-session-1",
+        summary,
+        cwd: workspaceRoot,
+      });
+
+    emitCodexTitle("Automatic Codex title");
+    await waitForPush(
+      ws,
+      ORCHESTRATION_WS_CHANNELS.domainEvent,
+      (push) =>
+        (push.data as { type?: string; payload?: { title?: string } }).type ===
+          "thread.meta-updated" &&
+        (push.data as { payload?: { title?: string } }).payload?.title ===
+          "Automatic Codex title",
+    );
+
+    emitCodexTitle("Explicit Codex rename");
+    await waitForPush(
+      ws,
+      ORCHESTRATION_WS_CHANNELS.domainEvent,
+      (push) =>
+        (push.data as { type?: string; payload?: { title?: string } }).type ===
+          "thread.meta-updated" &&
+        (push.data as { payload?: { title?: string } }).payload?.title ===
+          "Explicit Codex rename",
+    );
+
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.meta.update",
+      commandId: "cmd-codex-title-manual-rename",
+      threadId: "thread-codex-title",
+      title: "Manual HS Code title",
+    });
+    emitCodexTitle("Codex tries another rename");
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const snapshotResponse = await sendRequest(ws, ORCHESTRATION_WS_METHODS.getSnapshot);
+    const thread = (
+      snapshotResponse.result as {
+        threads: Array<{ id: string; title: string }>;
+      }
+    ).threads.find((candidate) => candidate.id === "thread-codex-title");
+    expect(thread?.title).toBe("Manual HS Code title");
+  });
+
+  it("detaches terminal event listeners on stop for injected manager", async () => {
     const terminalManager = new MockTerminalManager();
     server = await createTestServer({
       cwd: "/test",
       terminalManager,
     });
 
-    expect(terminalManager.subscriptionCount()).toBe(1);
+    expect(terminalManager.subscriptionCount()).toBe(2);
 
     await closeTestServer();
     server = null;

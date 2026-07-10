@@ -1467,8 +1467,15 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   >();
   const runPromise = Effect.runPromiseWith(runtimeServices);
 
-  const CLAUDE_SUMMARY_TITLE_MAX = 48;
-  const isAutoDerivedClaudeTerminalTitle = (title: string | null | undefined): boolean => {
+  const CLI_SUMMARY_TITLE_MAX = 48;
+  const cliManagedTitleByThreadId = new Map<
+    string,
+    { cliKind: "codex" | "claude"; title: string }
+  >();
+  const isAutoDerivedTerminalTitle = (
+    title: string | null | undefined,
+    cliKind: "codex" | "claude",
+  ): boolean => {
     if (isGenericTerminalThreadTitle(title)) {
       return true;
     }
@@ -1476,16 +1483,21 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     if (normalized.length === 0) {
       return true;
     }
-    const claudeBase = defaultTerminalTitleForCliKind("claude").toLowerCase();
-    if (normalized === claudeBase) {
-      return true;
-    }
-    // Also treat "<base> - <suffix>" / em-dash / en-dash variants as auto-derived,
-    // so threads displayed as "Claude Code - dpcode" still get renamed by Claude summaries.
-    return new RegExp(`^${claudeBase}\\s+[\\-\\u2013\\u2014]\\s+\\S`, "u").test(normalized);
+    const bases =
+      cliKind === "codex"
+        ? [defaultTerminalTitleForCliKind("codex"), "Codex"]
+        : [defaultTerminalTitleForCliKind("claude")];
+    return bases.some((base) => {
+      const normalizedBase = base.toLowerCase();
+      return (
+        normalized === normalizedBase ||
+        new RegExp(`^${normalizedBase}\\s+[\\-\\u2013\\u2014]\\s+\\S`, "u").test(normalized)
+      );
+    });
   };
   const applyCliSessionMeta = Effect.fnUntraced(function* (input: {
     threadId: string;
+    cliKind: "codex" | "claude";
     sessionId: string | null;
     summary: string | null;
   }) {
@@ -1500,13 +1512,25 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     const sessionIdChanged = nextSessionId !== null && thread.cliSessionId !== nextSessionId;
     const trimmedSummary = input.summary?.trim() ?? "";
     const truncatedSummary =
-      trimmedSummary.length > CLAUDE_SUMMARY_TITLE_MAX
-        ? `${trimmedSummary.slice(0, CLAUDE_SUMMARY_TITLE_MAX - 1).trimEnd()}…`
+      trimmedSummary.length > CLI_SUMMARY_TITLE_MAX
+        ? `${trimmedSummary.slice(0, CLI_SUMMARY_TITLE_MAX - 1).trimEnd()}…`
         : trimmedSummary;
+    const lastManagedTitle = cliManagedTitleByThreadId.get(input.threadId);
+    const providerOwnsCurrentTitle =
+      lastManagedTitle?.cliKind === input.cliKind && lastManagedTitle.title === thread.title;
     const shouldUpdateTitle =
       truncatedSummary.length > 0 &&
       truncatedSummary !== thread.title &&
-      isAutoDerivedClaudeTerminalTitle(thread.title);
+      (providerOwnsCurrentTitle || isAutoDerivedTerminalTitle(thread.title, input.cliKind));
+    if (
+      truncatedSummary.length > 0 &&
+      (shouldUpdateTitle || truncatedSummary === thread.title)
+    ) {
+      cliManagedTitleByThreadId.set(input.threadId, {
+        cliKind: input.cliKind,
+        title: truncatedSummary,
+      });
+    }
     if (!sessionIdChanged && !shouldUpdateTitle) {
       return;
     }
@@ -1784,6 +1808,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       void runPromise(
         applyCliSessionMeta({
           threadId: event.threadId,
+          cliKind: event.cliKind,
           sessionId: event.sessionId,
           summary: event.summary,
         }).pipe(Effect.catchCause(() => Effect.void)),

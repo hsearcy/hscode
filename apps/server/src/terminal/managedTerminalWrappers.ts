@@ -147,7 +147,7 @@ _t3code_emit_cli_meta_payload() {
   _t3code_meta_session_id="$2"
   _t3code_meta_summary="$3"
   _t3code_meta_cwd="$4"
-  if [ -z "$_t3code_meta_session_id" ] && [ -z "$_t3code_meta_cwd" ]; then
+  if [ -z "$_t3code_meta_session_id" ] && [ -z "$_t3code_meta_summary" ] && [ -z "$_t3code_meta_cwd" ]; then
     return
   fi
   if command -v base64 >/dev/null 2>&1; then
@@ -224,14 +224,14 @@ case "$_t3code_event" in
     _t3code_emit_osc '${buildHookOscSequence("PermissionRequest")}'
     ;;
   CliMeta)
-    # Forwarded by the Codex wrapper: carries the cwd of the most recent
-    # exec so the diff panel can follow Codex into worktrees it spawns.
+    # Forwarded by the Codex wrapper: carries provider title/session metadata
+    # plus the cwd of the most recent exec.
     _t3code_meta_cli_kind="$(_t3code_extract_event cli_kind)"
     [ -n "$_t3code_meta_cli_kind" ] || _t3code_meta_cli_kind="codex"
     _t3code_emit_cli_meta_payload \\
       "$_t3code_meta_cli_kind" \\
       "$(_t3code_extract_event session_id)" \\
-      "" \\
+      "$(_t3code_extract_event summary)" \\
       "$(_t3code_extract_event cwd)"
     ;;
 esac
@@ -292,6 +292,7 @@ function buildCodexWrapperScript(input: {
     '    _t3code_last_approval_id=""',
     '    _t3code_last_exec_call_id=""',
     '    _t3code_last_cwd=""',
+    '    _t3code_last_thread_name=""',
     '    _t3code_session_id=""',
     "    _t3code_approval_fallback_seq=0",
     "",
@@ -299,6 +300,14 @@ function buildCodexWrapperScript(input: {
     '      _t3code_event="$1"',
     `      _t3code_payload=$(printf '{"hook_event_name":"%s"}' "$_t3code_event")`,
     '      "$_t3code_notify" "$_t3code_payload" >/dev/null 2>&1 || true',
+    "    }",
+    "",
+    "    # Forward Codex's own automatic and /rename title updates.",
+    "    _t3code_emit_title() {",
+    '      _t3code_thread_name_value="$1"',
+    '      [ -n "$_t3code_thread_name_value" ] || return',
+    `      _t3code_meta_payload=$(printf '{"hook_event_name":"CliMeta","cli_kind":"codex","session_id":"%s","summary":"%s","cwd":"%s"}' "$_t3code_session_id" "$_t3code_thread_name_value" "$_t3code_last_cwd")`,
+    '      "$_t3code_notify" "$_t3code_meta_payload" >/dev/null 2>&1 || true',
     "    }",
     "",
     "    # Forward the cwd of Codex's most recent exec up the CLI meta channel so",
@@ -321,6 +330,13 @@ function buildCodexWrapperScript(input: {
     "",
     '    tail -n 0 -F "$_t3code_log" 2>/dev/null | while IFS= read -r _t3code_line; do',
     '      case "$_t3code_line" in',
+    `        *'"dir":"from_tui"'*'"kind":"op"'*'"SetThreadName"'*)`,
+    `          _t3code_thread_name=$(printf '%s\n' "$_t3code_line" | awk -F'"name":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
+    '          if [ -n "$_t3code_thread_name" ] && [ "$_t3code_thread_name" != "$_t3code_last_thread_name" ]; then',
+    '            _t3code_last_thread_name="$_t3code_thread_name"',
+    '            _t3code_emit_title "$_t3code_thread_name"',
+    "          fi",
+    "          ;;",
     `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"session_configured"'*)`,
     `          _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'"session_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
     `          [ -n "$_t3code_new_session_id" ] || _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'"conversation_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
@@ -368,7 +384,7 @@ function buildCodexWrapperScript(input: {
     "  ) &",
     "  T3CODE_CODEX_START_WATCHER_PID=$!",
     "fi",
-    `${shellQuote(targetPath)} --enable codex_hooks -c ${shellQuote(`notify=["bash",${JSON.stringify(notifyHookPath)}]`)} "$@"`,
+    `${shellQuote(targetPath)} --enable hooks -c ${shellQuote(`notify=["bash",${JSON.stringify(notifyHookPath)}]`)} "$@"`,
     "_t3code_status=$?",
     'if [ -n "${T3CODE_CODEX_START_WATCHER_PID:-}" ]; then',
     '  kill "$T3CODE_CODEX_START_WATCHER_PID" >/dev/null 2>&1 || true',
