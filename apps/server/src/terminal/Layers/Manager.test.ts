@@ -196,6 +196,7 @@ describe("TerminalManager", () => {
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
       ptyAdapter?: FakePtyAdapter;
+      historyByteLimit?: number;
     } = {},
   ) {
     const logsDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3code-terminal-"));
@@ -214,6 +215,7 @@ describe("TerminalManager", () => {
       ...(options.maxRetainedInactiveSessions
         ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
         : {}),
+      ...(options.historyByteLimit ? { historyByteLimit: options.historyByteLimit } : {}),
     });
     return { logsDir, ptyAdapter, manager };
   }
@@ -474,6 +476,63 @@ describe("TerminalManager", () => {
     const reopened = await manager.open(openInput());
     const nonEmptyLines = reopened.history.split("\n").filter((line) => line.length > 0);
     expect(nonEmptyLines).toEqual(["line2", "line3", "line4"]);
+
+    manager.dispose();
+  });
+
+  it("caps history bytes when output stays under the line limit", async () => {
+    const byteLimit = 2_048;
+    const { manager, ptyAdapter } = makeManager(5_000, { historyByteLimit: byteLimit });
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    // Full-screen TUI repaints: cursor addressing instead of newlines, so the
+    // line cap never trips no matter how many bytes accumulate.
+    for (let index = 0; index < 8; index += 1) {
+      process.emitData(`\u001b[2J\u001b[Hframe-${index}-`.padEnd(1_000, "x"));
+    }
+    await manager.close({ threadId: "thread-1" });
+
+    const reopened = await manager.open(openInput());
+    expect(reopened.history.length).toBeLessThanOrEqual(byteLimit);
+    expect(reopened.history).toContain("frame-7-");
+
+    manager.dispose();
+  });
+
+  it("caps oversized persisted history bytes when loading from disk", async () => {
+    const byteLimit = 4_096;
+    const { manager, logsDir } = makeManager(5_000, { historyByteLimit: byteLimit });
+    fs.writeFileSync(
+      multiTerminalHistoryLogPath(logsDir),
+      `start${"y".repeat(1_000_000)}end`,
+      "utf8",
+    );
+
+    const opened = await manager.open(openInput());
+    expect(opened.history.length).toBeLessThanOrEqual(byteLimit);
+    expect(opened.history.endsWith("end")).toBe(true);
+
+    manager.dispose();
+  });
+
+  it("drops runaway unterminated control sequences instead of buffering them forever", async () => {
+    const { manager, ptyAdapter } = makeManager();
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    // An OSC that never terminates (e.g. binary noise) would otherwise pin
+    // every subsequent byte inside pendingControlSequence.
+    process.emitData(`\u001b]${"a".repeat(300_000)}`);
+    process.emitData("recovered\n");
+    await manager.close({ threadId: "thread-1" });
+
+    const reopened = await manager.open(openInput());
+    expect(reopened.history).toContain("recovered");
 
     manager.dispose();
   });

@@ -49,6 +49,20 @@ import {
 } from "../Services/Manager";
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
+/**
+ * Hard byte ceiling on retained history, independent of the line limit.
+ * Full-screen TUIs (codex, claude) repaint via cursor addressing with almost
+ * no newlines, so a line limit alone lets history grow without bound — in
+ * production this reached tens of MB per session and OOM'd the server
+ * (V8 "JavaScript heap out of memory", 2026-07-11).
+ */
+const DEFAULT_HISTORY_BYTE_LIMIT = 2_000_000;
+/**
+ * Cap on the carry-over buffer for a control sequence split across PTY
+ * chunks. A sequence that never terminates (e.g. binary noise emitting
+ * ESC ] without a terminator) would otherwise absorb every subsequent byte.
+ */
+const PENDING_CONTROL_SEQUENCE_BYTE_LIMIT = 65_536;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -558,6 +572,22 @@ function capHistory(history: string, maxLines: number): string {
   return hasTrailingNewline ? `${capped}\n` : capped;
 }
 
+function capHistoryBytes(history: string, maxBytes: number): string {
+  if (history.length <= maxBytes) return history;
+  // Trim to half the budget so steady-state appends don't re-trim on every
+  // ~60fps chunk once the ceiling is reached.
+  const target = Math.max(1, Math.floor(maxBytes / 2));
+  const sliced = history.slice(history.length - target);
+  // Prefer resuming on a line boundary so re-attached clients don't replay a
+  // truncated escape sequence — but only when the boundary doesn't cost more
+  // than half the retained tail (newline-free TUI output may have none).
+  const newlineIndex = sliced.indexOf("\n");
+  if (newlineIndex !== -1 && newlineIndex + 1 < sliced.length && newlineIndex <= target / 2) {
+    return sliced.slice(newlineIndex + 1);
+  }
+  return sliced;
+}
+
 function countCharacter(value: string, target: string): number {
   let count = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -1016,6 +1046,7 @@ function appendSessionHistory(
   session: TerminalSessionState,
   chunk: string,
   historyLineLimit: number,
+  historyByteLimit: number,
 ): void {
   if (chunk.length === 0) return;
 
@@ -1024,14 +1055,16 @@ function appendSessionHistory(
   const nextEndsWithNewline = chunk.endsWith("\n");
   const nextLineCount = historyLineCount(nextHistory, nextLineBreakCount, nextEndsWithNewline);
 
-  if (nextLineCount <= historyLineLimit) {
+  if (nextLineCount <= historyLineLimit && nextHistory.length <= historyByteLimit) {
     session.history = nextHistory;
     session.historyLineBreakCount = nextLineBreakCount;
     session.historyEndsWithNewline = nextEndsWithNewline;
     return;
   }
 
-  session.history = capHistory(nextHistory, historyLineLimit);
+  const lineCapped =
+    nextLineCount > historyLineLimit ? capHistory(nextHistory, historyLineLimit) : nextHistory;
+  session.history = capHistoryBytes(lineCapped, historyByteLimit);
   const cappedMetrics = measureHistory(session.history);
   session.historyLineBreakCount = cappedMetrics.historyLineBreakCount;
   session.historyEndsWithNewline = cappedMetrics.historyEndsWithNewline;
@@ -1044,6 +1077,7 @@ interface TerminalManagerEvents {
 interface TerminalManagerOptions {
   logsDir?: string;
   historyLineLimit?: number;
+  historyByteLimit?: number;
   ptyAdapter: PtyAdapterShape;
   shellResolver?: () => string;
   subprocessChecker?: TerminalSubprocessChecker;
@@ -1069,6 +1103,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private managedWrapperBinDir: string | null;
   private managedWrapperZshDir: string | null;
   private readonly historyLineLimit: number;
+  private readonly historyByteLimit: number;
   private readonly ptyAdapter: PtyAdapterShape;
   private readonly shellResolver: () => string;
   private readonly persistQueues = new Map<string, Promise<void>>();
@@ -1097,6 +1132,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.managedWrapperZshDir =
       process.platform === "win32" ? null : path.join(this.logsDir, MANAGED_TERMINAL_ZSH_DIRNAME);
     this.historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
+    this.historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
     this.ptyAdapter = options.ptyAdapter;
     this.shellResolver = options.shellResolver ?? defaultShellResolver;
     this.persistDebounceMs = DEFAULT_PERSIST_DEBOUNCE_MS;
@@ -1654,7 +1690,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
   private onProcessData(session: TerminalSessionState, data: string): void {
     const sanitized = sanitizeTerminalHistoryChunk(session.pendingHistoryControlSequence, data);
-    session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
+    session.pendingHistoryControlSequence =
+      sanitized.pendingControlSequence.length > PENDING_CONTROL_SEQUENCE_BYTE_LIMIT
+        ? ""
+        : sanitized.pendingControlSequence;
     // When the managed event sink is active, hook OSC signals arrive through
     // the sink file instead of the PTY stream — ignore any that still leak
     // into PTY output so we don't double-process them.
@@ -1678,7 +1717,12 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       this.emitActivityEvent(session);
     }
     if (sanitized.visibleText.length > 0) {
-      appendSessionHistory(session, sanitized.visibleText, this.historyLineLimit);
+      appendSessionHistory(
+        session,
+        sanitized.visibleText,
+        this.historyLineLimit,
+        this.historyByteLimit,
+      );
       this.queuePersist(session.threadId, session.terminalId, session.history);
       const normalizedSignature = normalizeProviderOutputSignature(sanitized.visibleText);
       if (normalizedSignature.length > 0 && normalizedSignature !== session.lastOutputSignature) {
@@ -1985,7 +2029,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const nextPath = this.historyPath(threadId, terminalId);
     try {
       const raw = await fs.promises.readFile(nextPath, "utf8");
-      const capped = capHistory(raw, this.historyLineLimit);
+      const capped = capHistoryBytes(capHistory(raw, this.historyLineLimit), this.historyByteLimit);
       if (capped !== raw) {
         await fs.promises.writeFile(nextPath, capped, "utf8");
       }
@@ -2003,7 +2047,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const legacyPath = this.legacyHistoryPath(threadId);
     try {
       const raw = await fs.promises.readFile(legacyPath, "utf8");
-      const capped = capHistory(raw, this.historyLineLimit);
+      const capped = capHistoryBytes(capHistory(raw, this.historyLineLimit), this.historyByteLimit);
 
       // Migrate legacy transcript filename to the terminal-scoped path.
       await fs.promises.writeFile(nextPath, capped, "utf8");
