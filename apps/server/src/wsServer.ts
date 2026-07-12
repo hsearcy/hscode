@@ -125,6 +125,9 @@ import {
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 import { AppConfigRepository } from "./persistence/Services/AppConfig.ts";
 
+const CODEX_SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 /**
  * ServerShape - Service API for server lifecycle control.
  */
@@ -1522,10 +1525,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       truncatedSummary.length > 0 &&
       truncatedSummary !== thread.title &&
       (providerOwnsCurrentTitle || isAutoDerivedTerminalTitle(thread.title, input.cliKind));
-    if (
-      truncatedSummary.length > 0 &&
-      (shouldUpdateTitle || truncatedSummary === thread.title)
-    ) {
+    if (truncatedSummary.length > 0 && (shouldUpdateTitle || truncatedSummary === thread.title)) {
       cliManagedTitleByThreadId.set(input.threadId, {
         cliKind: input.cliKind,
         title: truncatedSummary,
@@ -2508,7 +2508,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               ? `claude --resume ${cliSessionId}`
               : `claude --session-id ${cliSessionId}`;
           } else {
-            initialCommand = launched ? "codex resume --last" : "codex";
+            initialCommand = !launched
+              ? "codex"
+              : cliSessionId && CODEX_SESSION_ID_PATTERN.test(cliSessionId)
+                ? `codex resume ${cliSessionId}`
+                : "codex resume";
           }
           yield* terminalManager.write({
             threadId: body.threadId,

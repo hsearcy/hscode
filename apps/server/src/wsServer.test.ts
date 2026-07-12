@@ -100,6 +100,7 @@ const defaultProviderHealthService: ProviderHealthShape = {
 class MockTerminalManager implements TerminalManagerShape {
   private readonly sessions = new Map<string, TerminalSessionSnapshot>();
   private readonly listeners = new Set<(event: TerminalEvent) => void>();
+  readonly writeInputs: TerminalWriteInput[] = [];
 
   private key(threadId: string, terminalId: string): string {
     return `${threadId}\u0000${terminalId}`;
@@ -145,6 +146,7 @@ class MockTerminalManager implements TerminalManagerShape {
 
   readonly write: TerminalManagerShape["write"] = (input: TerminalWriteInput) =>
     Effect.sync(() => {
+      this.writeInputs.push(input);
       const terminalId = input.terminalId ?? DEFAULT_TERMINAL_ID;
       const existing = this.sessions.get(this.key(input.threadId, terminalId));
       if (!existing) {
@@ -2647,6 +2649,110 @@ describe("WebSocket Server", () => {
     expect(renamedThread?.title).toBe("git push");
   });
 
+  it("resumes Codex by persisted id and falls back to the picker for legacy placeholders", async () => {
+    const terminalManager = new MockTerminalManager();
+    server = await createTestServer({ cwd: "/test", terminalManager });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const [ws] = await connectAndAwaitWelcome(port);
+    connections.push(ws);
+
+    const workspaceRoot = makeTempDir("t3code-ws-codex-resume-");
+    const createdAt = new Date().toISOString();
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "project.create",
+      commandId: "cmd-codex-resume-project-create",
+      projectId: "project-codex-resume",
+      title: "Codex Resume Project",
+      workspaceRoot,
+      defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+      createdAt,
+    });
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.create",
+      commandId: "cmd-codex-resume-thread-create",
+      threadId: "thread-codex-resume",
+      projectId: "project-codex-resume",
+      title: "Codex — Resume Project",
+      modelSelection: { provider: "codex", model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "terminal-cli",
+      branch: null,
+      worktreePath: null,
+      cliKind: "codex",
+      createdAt,
+    });
+
+    const openInput = {
+      threadId: "thread-codex-resume",
+      cwd: workspaceRoot,
+      cols: 100,
+      rows: 24,
+    };
+    await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
+    terminalManager.emitEvent({
+      type: "cli-session",
+      threadId: "thread-codex-resume",
+      terminalId: DEFAULT_TERMINAL_ID,
+      createdAt: new Date().toISOString(),
+      cliKind: "codex",
+      sessionId: "019f4c9e-f110-7d32-b2b7-f6c0b77def2c",
+      summary: null,
+      cwd: workspaceRoot,
+    });
+    await waitForPush(
+      ws,
+      ORCHESTRATION_WS_CHANNELS.domainEvent,
+      (push) =>
+        (push.data as { type?: string; payload?: { cliSessionId?: string } }).type ===
+          "thread.meta-updated" &&
+        (push.data as { payload?: { cliSessionId?: string } }).payload?.cliSessionId ===
+          "019f4c9e-f110-7d32-b2b7-f6c0b77def2c",
+    );
+    await sendRequest(ws, WS_METHODS.terminalClose, {
+      threadId: "thread-codex-resume",
+      deleteHistory: true,
+    });
+    await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
+
+    expect(terminalManager.writeInputs.map((input) => input.data)).toEqual([
+      "codex\r",
+      "codex resume 019f4c9e-f110-7d32-b2b7-f6c0b77def2c\r",
+    ]);
+
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.create",
+      commandId: "cmd-codex-legacy-resume-thread-create",
+      threadId: "thread-codex-legacy-resume",
+      projectId: "project-codex-resume",
+      title: "Legacy Codex Thread",
+      modelSelection: { provider: "codex", model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "terminal-cli",
+      branch: null,
+      worktreePath: null,
+      cliKind: "codex",
+      cliSessionId: "fe5e7097-7151-46ab-a766-61d5cd076cf2",
+      createdAt,
+    });
+    const legacyOpenInput = {
+      ...openInput,
+      threadId: "thread-codex-legacy-resume",
+    };
+    await sendRequest(ws, WS_METHODS.terminalOpen, legacyOpenInput);
+    await sendRequest(ws, WS_METHODS.terminalClose, {
+      threadId: "thread-codex-legacy-resume",
+      deleteHistory: true,
+    });
+    await sendRequest(ws, WS_METHODS.terminalOpen, legacyOpenInput);
+
+    expect(terminalManager.writeInputs.slice(-2).map((input) => input.data)).toEqual([
+      "codex\r",
+      "codex resume\r",
+    ]);
+  });
+
   it("tracks Codex-managed titles without overwriting a manual HS Code title", async () => {
     const terminalManager = new MockTerminalManager();
     server = await createTestServer({
@@ -2709,8 +2815,7 @@ describe("WebSocket Server", () => {
       (push) =>
         (push.data as { type?: string; payload?: { title?: string } }).type ===
           "thread.meta-updated" &&
-        (push.data as { payload?: { title?: string } }).payload?.title ===
-          "Automatic Codex title",
+        (push.data as { payload?: { title?: string } }).payload?.title === "Automatic Codex title",
     );
 
     emitCodexTitle("Explicit Codex rename");
@@ -2720,8 +2825,7 @@ describe("WebSocket Server", () => {
       (push) =>
         (push.data as { type?: string; payload?: { title?: string } }).type ===
           "thread.meta-updated" &&
-        (push.data as { payload?: { title?: string } }).payload?.title ===
-          "Explicit Codex rename",
+        (push.data as { payload?: { title?: string } }).payload?.title === "Explicit Codex rename",
     );
 
     await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {

@@ -636,7 +636,8 @@ function EventRouter() {
       threadSnapshotSequenceById.set(threadId, item.event.sequence);
       queueDomainEvent(item.event);
     });
-    // The server auto-runs `claude --resume <id>` (or `codex resume --last`)
+    // The server auto-runs `claude --resume <id>` or `codex resume <id>`
+    // (with Codex's picker as a one-time fallback for legacy unmapped threads)
     // on terminal open/restart, which triggers an idle→running transition
     // that isn't a user-submitted prompt. Skip that first transition per
     // (thread, terminal) so reopening an old conversation doesn't re-sort it.

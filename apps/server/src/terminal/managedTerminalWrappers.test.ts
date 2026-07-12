@@ -63,4 +63,26 @@ describe("managed terminal wrappers", () => {
     execFileSync("sh", ["-n", path.join(wrapperDir, "codex")]);
     execFileSync("sh", ["-n", state.hookScriptPath!]);
   });
+
+  it("forwards session ids from the current Codex TUI log format", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-session-id-"));
+    tempDirs.push(tempDir);
+    const sourceBinDir = path.join(tempDir, "source-bin");
+    const wrapperDir = path.join(tempDir, "wrappers");
+    fs.mkdirSync(sourceBinDir);
+    fs.writeFileSync(path.join(sourceBinDir, "codex"), "#!/bin/sh\n", { mode: 0o755 });
+
+    prepareManagedTerminalWrappers({
+      baseEnv: { PATH: sourceBinDir },
+      rootDir: wrapperDir,
+      zshRootDir: path.join(tempDir, "zsh"),
+    });
+
+    const wrapper = fs.readFileSync(path.join(wrapperDir, "codex"), "utf8");
+    expect(wrapper).toContain(
+      `*'"dir":"to_tui"'*'"kind":"app_event"'*'thread_id: ThreadId { uuid: '*)`,
+    );
+    expect(wrapper).toContain(`awk -F'thread_id: ThreadId { uuid: '`);
+    expect(wrapper).toContain('_t3code_emit_session_id "$_t3code_new_session_id"');
+  });
 });
