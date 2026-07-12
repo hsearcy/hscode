@@ -1561,6 +1561,21 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const cliReportedCwdByThreadId = new Map<string, string>();
   const pendingTerminalTurnByThreadId = new Map<string, SyntheticTerminalTurn>();
 
+  // These per-thread maps are only ever written on terminal activity; without
+  // this, entries for deleted threads (including every Codex subagent thread)
+  // survive for the life of the server process.
+  yield* Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
+    Effect.sync(() => {
+      if (event.type !== "thread.deleted") {
+        return;
+      }
+      cliManagedTitleByThreadId.delete(event.payload.threadId);
+      cliRunningTerminalsByThreadId.delete(event.payload.threadId);
+      cliReportedCwdByThreadId.delete(event.payload.threadId);
+      pendingTerminalTurnByThreadId.delete(event.payload.threadId);
+    }),
+  ).pipe(Effect.forkIn(subscriptionsScope));
+
   // Capture must always run from the worktree root, not a deep subdirectory.
   // `git add -A .` only adds files under the cwd, but `read-tree HEAD` reads
   // the full tree, so capturing from a subdir would write the entire HEAD tree

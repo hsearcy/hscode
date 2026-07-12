@@ -110,6 +110,89 @@ describe("orchestration projector", () => {
     ]);
   });
 
+  it("removes threads from the read model on thread.deleted", async () => {
+    const now = new Date().toISOString();
+    const model = createEmptyReadModel(now);
+
+    const created = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: {
+              provider: "codex",
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+
+    const afterDelete = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.deleted",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-delete",
+          payload: {
+            threadId: "thread-1",
+            deletedAt: now,
+          },
+        }),
+      ),
+    );
+
+    // Every consumer already filters deletedAt === null, and thread.deleted is
+    // terminal (no restore event) — retaining the object only leaks memory,
+    // one permanent entry per deleted thread/subagent.
+    expect(afterDelete.threads).toEqual([]);
+    expect(afterDelete.snapshotSequence).toBe(2);
+  });
+
+  it("ignores thread.deleted for unknown threads", async () => {
+    const now = new Date().toISOString();
+    const model = createEmptyReadModel(now);
+
+    const next = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.deleted",
+          aggregateKind: "thread",
+          aggregateId: "thread-missing",
+          occurredAt: now,
+          commandId: "cmd-thread-delete",
+          payload: {
+            threadId: "thread-missing",
+            deletedAt: now,
+          },
+        }),
+      ),
+    );
+
+    expect(next.threads).toEqual([]);
+    expect(next.snapshotSequence).toBe(1);
+  });
+
   it("fails when event payload cannot be decoded by runtime schema", async () => {
     const now = new Date().toISOString();
     const model = createEmptyReadModel(now);

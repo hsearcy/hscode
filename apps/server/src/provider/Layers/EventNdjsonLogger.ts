@@ -17,6 +17,13 @@ import { toSafeThreadAttachmentSegment } from "../../attachmentStore.ts";
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 10;
 const DEFAULT_BATCH_WINDOW_MS = 200;
+/**
+ * LRU cap on live per-thread writers. Each entry pins a file sink plus a
+ * batched-logger scope, keyed by thread segment — including every Codex
+ * subagent thread — and was previously only released on close(). Evicted
+ * writers flush on close and are transparently recreated on the next write.
+ */
+const MAX_LIVE_THREAD_WRITERS = 256;
 const GLOBAL_THREAD_SEGMENT = "_global";
 const LOG_SCOPE = "provider-observability";
 
@@ -207,6 +214,9 @@ export function makeEventNdjsonLogger(
         }
         const existing = threadWriters.get(threadSegment);
         if (existing) {
+          // Refresh insertion order so the map doubles as an LRU.
+          threadWriters.delete(threadSegment);
+          threadWriters.set(threadSegment, existing);
           return existing;
         }
 
@@ -223,6 +233,17 @@ export function makeEventNdjsonLogger(
         }
 
         threadWriters.set(threadSegment, writer);
+        while (threadWriters.size > MAX_LIVE_THREAD_WRITERS) {
+          const oldestSegment = threadWriters.keys().next().value;
+          if (oldestSegment === undefined) {
+            break;
+          }
+          const oldestWriter = threadWriters.get(oldestSegment);
+          threadWriters.delete(oldestSegment);
+          if (oldestWriter) {
+            yield* oldestWriter.close();
+          }
+        }
         return writer;
       });
 

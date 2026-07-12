@@ -11,6 +11,8 @@ class MockWebSocket {
 
   readonly OPEN = MockWebSocket.OPEN;
   readyState = MockWebSocket.OPEN;
+  bufferedAmount = 0;
+  terminated = false;
   readonly sent: string[] = [];
   private readonly waiters = new Set<() => void>();
 
@@ -19,6 +21,11 @@ class MockWebSocket {
     for (const waiter of this.waiters) {
       waiter();
     }
+  }
+
+  terminate() {
+    this.terminated = true;
+    this.readyState = 3;
   }
 
   waitForSentCount(count: number): Promise<void> {
@@ -98,6 +105,60 @@ describe("makeServerPushBus", () => {
             providers: [],
           },
         });
+      }),
+    ),
+  );
+
+  it.live("terminates clients whose socket buffer is hopelessly backlogged", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const healthy = new MockWebSocket();
+        const backlogged = new MockWebSocket();
+        backlogged.bufferedAmount = 64 * 1024 * 1024;
+        const clients = yield* Ref.make(
+          new Set<WebSocket>([healthy as unknown as WebSocket, backlogged as unknown as WebSocket]),
+        );
+        const pushBus = yield* makeServerPushBus({
+          clients,
+          logOutgoingPush: () => {},
+        });
+
+        yield* pushBus.publishAll(WS_CHANNELS.serverConfigUpdated, {
+          issues: [],
+          providers: [],
+        });
+
+        yield* Effect.promise(() => healthy.waitForSentCount(1));
+
+        expect(healthy.terminated).toBe(false);
+        expect(backlogged.sent).toHaveLength(0);
+        expect(backlogged.terminated).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("resolves publishClient as undelivered instead of hanging when the queue is full", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = new MockWebSocket();
+        const clients = yield* Ref.make(new Set<WebSocket>());
+        const pushBus = yield* makeServerPushBus({
+          clients,
+          logOutgoingPush: () => {},
+          queueCapacity: 0,
+        });
+
+        const delivered = yield* pushBus.publishClient(
+          client as unknown as WebSocket,
+          WS_CHANNELS.serverWelcome,
+          {
+            cwd: "/tmp/project",
+            projectName: "project",
+          },
+        );
+
+        expect(delivered).toBe(false);
+        expect(client.sent).toHaveLength(0);
       }),
     ),
   );

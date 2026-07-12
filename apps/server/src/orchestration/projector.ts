@@ -333,13 +333,14 @@ export function projectEvent(
       });
 
     case "thread.deleted":
+      // Physically remove the thread: deletion is terminal (no restore event)
+      // and every consumer filters deletedAt === null, so a retained object is
+      // pure leak — one permanent entry (plus messages/activities) per deleted
+      // thread, including every Codex subagent thread.
       return decodeForEvent(ThreadDeletedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
           ...nextBase,
-          threads: updateThread(nextBase.threads, payload.threadId, {
-            deletedAt: payload.deletedAt,
-            updatedAt: payload.deletedAt,
-          }),
+          threads: nextBase.threads.filter((entry) => entry.id !== payload.threadId),
         })),
       );
 

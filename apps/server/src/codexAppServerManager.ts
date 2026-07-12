@@ -218,6 +218,15 @@ export interface CodexThreadSnapshot {
 
 const CODEX_VERSION_CHECK_TIMEOUT_MS = 4_000;
 
+/**
+ * collabReceiverParents intentionally survives turn boundaries (late child
+ * conversation events must still route to their parent), so unlike
+ * collabReceiverTurns it is never cleared. Bound it with insertion-order
+ * eviction so a long-lived session spawning many subagents cannot grow it
+ * forever.
+ */
+const MAX_COLLAB_RECEIVER_PARENTS = 4_096;
+
 const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
 const CODEX_STDERR_LOG_REGEX =
@@ -2792,6 +2801,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       context.collabReceiverTurns.set(receiverThreadId, parentTurnId);
       if (parentProviderThreadId) {
         context.collabReceiverParents.set(receiverThreadId, parentProviderThreadId);
+        while (context.collabReceiverParents.size > MAX_COLLAB_RECEIVER_PARENTS) {
+          const oldest = context.collabReceiverParents.keys().next().value;
+          if (oldest === undefined) {
+            break;
+          }
+          context.collabReceiverParents.delete(oldest);
+        }
       }
     }
   }
