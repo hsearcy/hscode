@@ -220,8 +220,22 @@ case "$_t3code_event" in
     _t3code_emit_osc '${buildHookOscSequence("Start")}'
     _t3code_emit_claude_meta
     ;;
-  PermissionRequest|PreToolUse|Notification)
+  PermissionRequest|PreToolUse)
     _t3code_emit_osc '${buildHookOscSequence("PermissionRequest")}'
+    ;;
+  Notification)
+    # Claude fires Notification for more than permission prompts: 60s after a
+    # turn ends it sends "Claude is waiting for your input" even though Stop
+    # already parked the session in review. Forwarding that as an attention
+    # signal bounces every idle thread review -> attention. Drop idle pings;
+    # anything else (permission / approval requests) still pages attention.
+    case "$(_t3code_extract_event message)" in
+      *[Ww]aiting*for*input*)
+        ;;
+      *)
+        _t3code_emit_osc '${buildHookOscSequence("PermissionRequest")}'
+        ;;
+    esac
     ;;
   CliMeta)
     # Forwarded by the Codex wrapper: carries provider title/session metadata

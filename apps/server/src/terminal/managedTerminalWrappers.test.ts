@@ -124,6 +124,61 @@ describe("managed terminal wrappers", () => {
     execFileSync("sh", ["-n", state.hookScriptPath!]);
   });
 
+  describe("Claude notify hook signal mapping", () => {
+    const HOOK_OSC = (eventType: string) => `]633;T3CODE_AGENT_EVENT=${eventType}`;
+
+    function runNotifyHook(payload: Record<string, unknown>): string {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-notify-hook-"));
+      tempDirs.push(tempDir);
+      const sourceBinDir = path.join(tempDir, "source-bin");
+      fs.mkdirSync(sourceBinDir);
+      fs.writeFileSync(path.join(sourceBinDir, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+
+      const state = prepareManagedTerminalWrappers({
+        baseEnv: { PATH: sourceBinDir },
+        rootDir: path.join(tempDir, "wrappers"),
+        zshRootDir: path.join(tempDir, "zsh"),
+      });
+
+      const sinkPath = path.join(tempDir, "events.sink");
+      fs.writeFileSync(sinkPath, "");
+      execFileSync("sh", [state.hookScriptPath!], {
+        input: JSON.stringify(payload),
+        env: { ...process.env, T3CODE_TERMINAL_EVENT_SINK: sinkPath },
+      });
+      return fs.readFileSync(sinkPath, "utf8");
+    }
+
+    it("emits an attention signal for permission-prompt Notifications", () => {
+      const sink = runNotifyHook({
+        hook_event_name: "Notification",
+        message: "Claude needs your permission to use Bash",
+      });
+      expect(sink).toContain(HOOK_OSC("PermissionRequest"));
+    });
+
+    it("emits an attention signal for PermissionRequest hook events", () => {
+      const sink = runNotifyHook({ hook_event_name: "PermissionRequest" });
+      expect(sink).toContain(HOOK_OSC("PermissionRequest"));
+    });
+
+    it("drops the 60s idle waiting-for-input Notification instead of paging attention", () => {
+      // Claude fires Notification("Claude is waiting for your input") 60s after
+      // a turn ends. Mapping it to PermissionRequest bounced every idle thread
+      // review → attention and paged webhook subscribers with nothing to do.
+      const sink = runNotifyHook({
+        hook_event_name: "Notification",
+        message: "Claude is waiting for your input",
+      });
+      expect(sink).not.toContain("T3CODE_AGENT_EVENT=");
+    });
+
+    it("still emits a review signal for Stop hook events", () => {
+      const sink = runNotifyHook({ hook_event_name: "Stop" });
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+  });
+
   it("forwards session ids from the current Codex TUI log format", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-session-id-"));
     tempDirs.push(tempDir);

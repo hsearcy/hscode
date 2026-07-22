@@ -46,6 +46,7 @@ import {
   saveSubscriptions,
   type ScreenScope,
 } from "./subscriptionStore.ts";
+import { createThreadEventGate } from "./threadEventGate.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.5",
@@ -174,7 +175,6 @@ interface ThreadEventSubscription {
 }
 
 const subscriptions = new Map<string, ThreadEventSubscription>();
-const lastStateByThread = new Map<string, string | null>();
 let pushHandlerInstalled = false;
 
 // Subscriptions outlive the MCP process: persist them to disk so a
@@ -202,13 +202,15 @@ function loadSubscriptions(): number {
   return subscriptions.size;
 }
 
-// Per-thread pending "attention" debounce. An auto-allowed permission prompt
-// (e.g. tool calls under auto-mode) registers as a transient attention state
-// that flips back to "running" within ~100 ms. We delay forwarding attention
-// transitions so only the ones that actually stick (real prompts the user
-// needs to answer) make it to the webhook.
-const ATTENTION_STABLE_MS = 3000;
-const pendingAttentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Stabilization gate: transient attention (auto-allowed permission prompts)
+// and Claude review churn (Stop while stop hooks / background subagents are
+// still working) are held until the state sticks — see threadEventGate.ts.
+const threadEventGate = createThreadEventGate({
+  forward: (input) => {
+    if (subscriptions.size === 0) return;
+    void fanOutThreadEvent(input);
+  },
+});
 
 function ensureGlobalPushHandler(): void {
   if (pushHandlerInstalled) return;
@@ -220,43 +222,7 @@ function ensureGlobalPushHandler(): void {
   ws.enableAutoReconnect();
   ws.onPush((channel, data) => {
     if (channel !== "terminal.event" || !data || typeof data !== "object") return;
-    const ev = data as Record<string, unknown>;
-    if (ev.type !== "activity") return;
-    const threadId = typeof ev.threadId === "string" ? ev.threadId : null;
-    if (!threadId) return;
-    // Workspace-area items have synthetic thread ids like `workspace:<uuid>`
-    // (see apps/web/src/workspaceStore.ts). They share the terminal.event
-    // channel but aren't real conversation threads — skip them.
-    if (threadId.startsWith("workspace:")) return;
-    const state = (ev.agentState as string | null | undefined) ?? null;
-    const prev = lastStateByThread.get(threadId) ?? null;
-    if (state === prev) return; // dedupe non-transitions
-    lastStateByThread.set(threadId, state);
-
-    // Always cancel any pending attention timer when state changes — if we
-    // were waiting to forward an attention that flipped to running, the
-    // permission was auto-allowed and we should suppress it.
-    const pending = pendingAttentionTimers.get(threadId);
-    if (pending) {
-      clearTimeout(pending);
-      pendingAttentionTimers.delete(threadId);
-    }
-    if (subscriptions.size === 0) return;
-
-    if (state === "attention") {
-      // Defer attention forwarding so transient auto-mode allows don't fire.
-      const evCopy = ev;
-      const timer = setTimeout(() => {
-        pendingAttentionTimers.delete(threadId);
-        // Re-check the current state; only forward if still attention.
-        if (lastStateByThread.get(threadId) === "attention") {
-          void fanOutThreadEvent({ threadId, state: "attention", ev: evCopy });
-        }
-      }, ATTENTION_STABLE_MS);
-      pendingAttentionTimers.set(threadId, timer);
-      return;
-    }
-    void fanOutThreadEvent({ threadId, state, ev });
+    threadEventGate.handleActivity(data as Record<string, unknown>);
   });
 }
 
