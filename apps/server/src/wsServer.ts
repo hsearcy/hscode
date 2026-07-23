@@ -120,6 +120,8 @@ import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracke
 import {
   defaultTerminalTitleForCliKind,
   isGenericTerminalThreadTitle,
+  isClaudeTerminalCliKind,
+  terminalCliKindsShareProvider,
   type TerminalCliKind,
 } from "@t3tools/shared/terminalThreads";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
@@ -1473,11 +1475,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const CLI_SUMMARY_TITLE_MAX = 48;
   const cliManagedTitleByThreadId = new Map<
     string,
-    { cliKind: "codex" | "claude"; title: string }
+    { cliKind: TerminalCliKind; title: string }
   >();
   const isAutoDerivedTerminalTitle = (
     title: string | null | undefined,
-    cliKind: "codex" | "claude",
+    cliKind: TerminalCliKind,
   ): boolean => {
     if (isGenericTerminalThreadTitle(title)) {
       return true;
@@ -1489,7 +1491,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     const bases =
       cliKind === "codex"
         ? [defaultTerminalTitleForCliKind("codex"), "Codex"]
-        : [defaultTerminalTitleForCliKind("claude")];
+        : [defaultTerminalTitleForCliKind(cliKind)];
     return bases.some((base) => {
       const normalizedBase = base.toLowerCase();
       return (
@@ -1500,7 +1502,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   };
   const applyCliSessionMeta = Effect.fnUntraced(function* (input: {
     threadId: string;
-    cliKind: "codex" | "claude";
+    cliKind: TerminalCliKind;
     sessionId: string | null;
     summary: string | null;
   }) {
@@ -1509,6 +1511,8 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     if (!thread) {
       return;
     }
+    const effectiveCliKind =
+      thread.cliKind === "claudex" && input.cliKind === "claude" ? "claudex" : input.cliKind;
     // Codex reports cwd without a stable session id; only adopt an id when one
     // is actually present so we never clobber Claude's `--resume` token.
     const nextSessionId = input.sessionId;
@@ -1520,14 +1524,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         : trimmedSummary;
     const lastManagedTitle = cliManagedTitleByThreadId.get(input.threadId);
     const providerOwnsCurrentTitle =
-      lastManagedTitle?.cliKind === input.cliKind && lastManagedTitle.title === thread.title;
+      lastManagedTitle?.cliKind === effectiveCliKind && lastManagedTitle.title === thread.title;
     const shouldUpdateTitle =
       truncatedSummary.length > 0 &&
       truncatedSummary !== thread.title &&
-      (providerOwnsCurrentTitle || isAutoDerivedTerminalTitle(thread.title, input.cliKind));
+      (providerOwnsCurrentTitle || isAutoDerivedTerminalTitle(thread.title, effectiveCliKind));
     if (truncatedSummary.length > 0 && (shouldUpdateTitle || truncatedSummary === thread.title)) {
       cliManagedTitleByThreadId.set(input.threadId, {
-        cliKind: input.cliKind,
+        cliKind: effectiveCliKind,
         title: truncatedSummary,
       });
     }
@@ -2508,7 +2512,8 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           if (
             activity &&
             (activity.managedAgentRunning ||
-              (activity.hasRunningSubprocess && activity.detectedCliKind === cliKind))
+              (activity.hasRunningSubprocess &&
+                terminalCliKindsShareProvider(activity.detectedCliKind, cliKind)))
           ) {
             if (!launched) {
               yield* projectionThreadRepository.markCliLaunchedOnce({
@@ -2518,10 +2523,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             return;
           }
           let initialCommand: string;
-          if (cliKind === "claude") {
+          if (isClaudeTerminalCliKind(cliKind)) {
+            const command = cliKind === "claudex" ? "claudex" : "claude";
             initialCommand = launched
-              ? `claude --resume ${cliSessionId}`
-              : `claude --session-id ${cliSessionId}`;
+              ? `${command} --resume ${cliSessionId}`
+              : `${command} --session-id ${cliSessionId}`;
           } else {
             initialCommand = !launched
               ? "codex"

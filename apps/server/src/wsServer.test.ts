@@ -2753,6 +2753,61 @@ describe("WebSocket Server", () => {
     ]);
   });
 
+  it("launches and resumes Claudex threads with the Claudex alias", async () => {
+    const terminalManager = new MockTerminalManager();
+    server = await createTestServer({ cwd: "/test", terminalManager });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const [ws] = await connectAndAwaitWelcome(port);
+    connections.push(ws);
+
+    const workspaceRoot = makeTempDir("t3code-ws-claudex-");
+    const createdAt = new Date().toISOString();
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "project.create",
+      commandId: "cmd-claudex-project-create",
+      projectId: "project-claudex",
+      title: "Claudex Project",
+      workspaceRoot,
+      defaultModelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
+      createdAt,
+    });
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.create",
+      commandId: "cmd-claudex-thread-create",
+      threadId: "thread-claudex",
+      projectId: "project-claudex",
+      title: "Claudex — Project",
+      modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
+      runtimeMode: "full-access",
+      interactionMode: "terminal-cli",
+      branch: null,
+      worktreePath: null,
+      cliKind: "claudex",
+      cliSessionId: "550e8400-e29b-41d4-a716-446655440000",
+      createdAt,
+    });
+
+    const openInput = {
+      threadId: "thread-claudex",
+      cwd: workspaceRoot,
+      cols: 100,
+      rows: 24,
+    };
+    await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
+    await sendRequest(ws, WS_METHODS.terminalClose, {
+      threadId: "thread-claudex",
+      deleteHistory: true,
+    });
+    await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
+
+    expect(terminalManager.writeInputs.map((input) => input.data)).toEqual([
+      "claudex --session-id 550e8400-e29b-41d4-a716-446655440000\r",
+      "claudex --resume 550e8400-e29b-41d4-a716-446655440000\r",
+    ]);
+  });
+
   it("tracks Codex-managed titles without overwriting a manual HS Code title", async () => {
     const terminalManager = new MockTerminalManager();
     server = await createTestServer({

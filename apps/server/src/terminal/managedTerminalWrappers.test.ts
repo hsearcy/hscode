@@ -16,6 +16,66 @@ describe("managed terminal wrappers", () => {
     }
   });
 
+  it("preserves the inherited CODEX_HOME", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-home-"));
+    tempDirs.push(tempDir);
+    const sourceBinDir = path.join(tempDir, "source-bin");
+    const wrapperDir = path.join(tempDir, "wrappers");
+    const inheritedCodexHome = path.join(tempDir, "inherited-codex-home");
+    fs.mkdirSync(sourceBinDir);
+    fs.mkdirSync(inheritedCodexHome);
+
+    fs.writeFileSync(
+      path.join(sourceBinDir, "codex"),
+      '#!/bin/sh\nprintf "%s" "${CODEX_HOME:-}"\n',
+      { mode: 0o755 },
+    );
+
+    const state = prepareManagedTerminalWrappers({
+      baseEnv: { PATH: sourceBinDir },
+      rootDir: wrapperDir,
+      zshRootDir: path.join(tempDir, "zsh"),
+    });
+    fs.rmSync(state.hookScriptPath!);
+
+    const output = execFileSync(path.join(wrapperDir, "codex"), {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: inheritedCodexHome },
+    });
+
+    expect(output.endsWith(inheritedCodexHome)).toBe(true);
+  });
+
+  it("leaves CODEX_HOME unset when it was not inherited", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-home-"));
+    tempDirs.push(tempDir);
+    const sourceBinDir = path.join(tempDir, "source-bin");
+    const wrapperDir = path.join(tempDir, "wrappers");
+    fs.mkdirSync(sourceBinDir);
+
+    fs.writeFileSync(
+      path.join(sourceBinDir, "codex"),
+      '#!/bin/sh\nprintf "%s" "${CODEX_HOME-unset}"\n',
+      { mode: 0o755 },
+    );
+
+    const state = prepareManagedTerminalWrappers({
+      baseEnv: { PATH: sourceBinDir },
+      rootDir: wrapperDir,
+      zshRootDir: path.join(tempDir, "zsh"),
+    });
+    fs.rmSync(state.hookScriptPath!);
+
+    const output = execFileSync(path.join(wrapperDir, "codex"), {
+      encoding: "utf8",
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => key !== "CODEX_HOME"),
+      ),
+    });
+
+    expect(output.endsWith("unset")).toBe(true);
+  });
+
   it("enables the current Codex hooks feature without the deprecated alias", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-hooks-"));
     tempDirs.push(tempDir);

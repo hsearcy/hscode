@@ -4,7 +4,7 @@
 // Exports: command parsing plus resolved terminal presentation metadata for web/server consumers.
 
 export const GENERIC_TERMINAL_THREAD_TITLE = "New terminal";
-export type TerminalCliKind = "codex" | "claude";
+export type TerminalCliKind = "codex" | "claude" | "claudex";
 export type TerminalIconKey = "terminal" | "openai" | "claude";
 export type TerminalActivityState = "running" | "attention" | "review";
 export type TerminalVisualState = "idle" | TerminalActivityState;
@@ -18,6 +18,7 @@ export const T3CODE_TERMINAL_CLI_META_OSC_PREFIX = "633;T3CODE_CLI_META=";
 export const MANAGED_TERMINAL_COMMAND_NAME_BY_CLI_KIND: Record<TerminalCliKind, string> = {
   codex: "codex",
   claude: "claude",
+  claudex: "claudex",
 };
 
 export interface TerminalCommandIdentity {
@@ -47,6 +48,7 @@ const MAX_TERMINAL_TITLE_LENGTH = 48;
 const WRAPPER_COMMANDS = new Set(["builtin", "command", "env", "noglob", "nocorrect", "sudo"]);
 const CODEX_COMMAND_NAMES = new Set(["codex", "codex-cli"]);
 const CLAUDE_COMMAND_NAMES = new Set(["claude", "claude-code", "claude_code"]);
+const CLAUDEX_COMMAND_NAMES = new Set(["claudex"]);
 const OUTPUT_CODEX_TEXT_PATTERNS = [/\bopenai codex\b(?:\s*\(|\s+v)/i, /\bcodex cli\b/i];
 const OUTPUT_CLAUDE_TEXT_PATTERNS = [/\bclaude code\b(?:\s+v\d|\s*$)/i];
 const TITLE_CODEX_TEXT_PATTERNS = [/\bopenai codex\b/i, /\bcodex cli\b/i];
@@ -112,6 +114,9 @@ function deriveCliKindFromNormalizedToken(token: string): TerminalCliKind | null
   }
   if (CODEX_COMMAND_NAMES.has(normalizedToken) || normalizedToken === "@openai/codex") {
     return "codex";
+  }
+  if (CLAUDEX_COMMAND_NAMES.has(normalizedToken)) {
+    return "claudex";
   }
   if (
     CLAUDE_COMMAND_NAMES.has(normalizedToken) ||
@@ -272,13 +277,27 @@ function createTerminalCommandIdentity(
 ): TerminalCommandIdentity {
   return {
     cliKind,
-    iconKey: cliKind === "codex" ? "openai" : cliKind === "claude" ? "claude" : "terminal",
+    iconKey: cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
     title,
   };
 }
 
+export function isClaudeTerminalCliKind(
+  cliKind: TerminalCliKind | null | undefined,
+): boolean {
+  return cliKind === "claude" || cliKind === "claudex";
+}
+
+export function terminalCliKindsShareProvider(
+  left: TerminalCliKind | null | undefined,
+  right: TerminalCliKind | null | undefined,
+): boolean {
+  return left === right || (isClaudeTerminalCliKind(left) && isClaudeTerminalCliKind(right));
+}
+
 export function defaultTerminalTitleForCliKind(cliKind: TerminalCliKind): string {
-  return cliKind === "codex" ? "Codex CLI" : "Claude Code";
+  if (cliKind === "codex") return "Codex CLI";
+  return cliKind === "claudex" ? "Claudex" : "Claude Code";
 }
 
 export function managedTerminalCommandNameForCliKind(cliKind: TerminalCliKind): string {
@@ -287,7 +306,11 @@ export function managedTerminalCommandNameForCliKind(cliKind: TerminalCliKind): 
 
 export function terminalCliKindFromValue(value: string | null | undefined): TerminalCliKind | null {
   const normalizedValue = value?.trim().toLowerCase();
-  return normalizedValue === "codex" || normalizedValue === "claude" ? normalizedValue : null;
+  return normalizedValue === "codex" ||
+    normalizedValue === "claude" ||
+    normalizedValue === "claudex"
+    ? normalizedValue
+    : null;
 }
 
 // Prefer the actual spawned process name over shell aliases when attributing terminal providers.
@@ -307,6 +330,9 @@ export function deriveTerminalProcessIdentity(
   if (tokenCliKind === "claude") {
     return createTerminalCommandIdentity(defaultTerminalTitleForCliKind("claude"), "claude");
   }
+  if (tokenCliKind === "claudex") {
+    return createTerminalCommandIdentity(defaultTerminalTitleForCliKind("claudex"), "claudex");
+  }
   return null;
 }
 
@@ -320,6 +346,9 @@ function inferCliKindFromTitle(title: string | null | undefined): TerminalCliKin
   }
   if (/^claude(?: code)?(?: \d+)?$/.test(normalizedTitle) || normalizedTitle === "claude-code") {
     return "claude";
+  }
+  if (/^claudex(?: \d+)?$/.test(normalizedTitle)) {
+    return "claudex";
   }
   return (
     textMatchesCliPatterns(normalizedTitle, TITLE_CODEX_TEXT_PATTERNS, "codex") ??
@@ -364,6 +393,9 @@ export function deriveTerminalCommandIdentity(command: string): TerminalCommandI
   }
   if (detectedCliKind === "claude" || (first === "claude" && second === "code")) {
     return createTerminalCommandIdentity("Claude Code", "claude");
+  }
+  if (detectedCliKind === "claudex") {
+    return createTerminalCommandIdentity("Claudex", "claudex");
   }
   if (first === "git") {
     return createTerminalCommandIdentity(
@@ -497,7 +529,7 @@ export function resolveTerminalVisualIdentity(input: {
   const state = input.state ?? (input.isRunning ? "running" : "idle");
   return {
     cliKind,
-    iconKey: cliKind === "codex" ? "openai" : cliKind === "claude" ? "claude" : "terminal",
+    iconKey: cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
     state,
     title,
   };

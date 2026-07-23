@@ -678,7 +678,9 @@ function extractCliSessionMetaSignal(content: string): CliSessionMetaSignal | nu
     summary?: unknown;
     cwd?: unknown;
   };
-  const cliKind = record.cliKind === "codex" || record.cliKind === "claude" ? record.cliKind : null;
+  const cliKind = terminalCliKindFromValue(
+    typeof record.cliKind === "string" ? record.cliKind : null,
+  );
   if (!cliKind) {
     return null;
   }

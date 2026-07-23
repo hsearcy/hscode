@@ -137,7 +137,9 @@ const TerminalActivityEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("activity"),
   hasRunningSubprocess: Schema.Boolean,
-  cliKind: Schema.NullOr(Schema.Union([Schema.Literal("codex"), Schema.Literal("claude")])),
+  cliKind: Schema.NullOr(
+    Schema.Union([Schema.Literal("codex"), Schema.Literal("claude"), Schema.Literal("claudex")]),
+  ),
   agentState: Schema.NullOr(
     Schema.Union([
       Schema.Literal("running"),
@@ -154,7 +156,11 @@ const TerminalActivityEvent = Schema.Struct({
 const TerminalCliSessionEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("cli-session"),
-  cliKind: Schema.Union([Schema.Literal("codex"), Schema.Literal("claude")]),
+  cliKind: Schema.Union([
+    Schema.Literal("codex"),
+    Schema.Literal("claude"),
+    Schema.Literal("claudex"),
+  ]),
   sessionId: Schema.NullOr(Schema.String.check(Schema.isNonEmpty())),
   summary: Schema.NullOr(Schema.String),
   cwd: Schema.NullOr(Schema.String),

@@ -26,6 +26,7 @@ import {
   OrchestrationThreadActivity,
   ProviderInteractionMode,
   RuntimeMode,
+  type TerminalCliKind,
 } from "@t3tools/contracts";
 import {
   applyClaudePromptEffortPrefix,
@@ -326,11 +327,13 @@ import {
   hasServerAcknowledgedLocalDispatch,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
+  TERMINAL_CLI_THREAD_OPTIONS,
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   readFileAsDataUrl,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  terminalCliThreadLabel,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerSlashCommands } from "../hooks/useComposerSlashCommands";
@@ -2945,7 +2948,7 @@ export default function ChatView({
       },
       onTerminalMetadataChange: (
         terminalId: string,
-        metadata: { cliKind: "codex" | "claude" | null; label: string },
+        metadata: { cliKind: TerminalCliKind | null; label: string },
       ) => {
         if (!activeThreadId) return;
         storeSetTerminalMetadata(activeThreadId, terminalId, metadata);
@@ -5862,14 +5865,14 @@ export default function ChatView({
   ]);
 
   const handleCreateCliThread = useCallback(
-    async (cliKind: "claude" | "codex") => {
+    async (cliKind: TerminalCliKind) => {
       const api = readNativeApi();
       if (!api || !activeProject) {
         return;
       }
       const createdAt = new Date().toISOString();
       const nextThreadId = newThreadId();
-      const cliLabel = cliKind === "claude" ? "Claude Code" : "Codex";
+      const cliLabel = terminalCliThreadLabel(cliKind);
       const title = `${cliLabel} — ${activeProjectDisplayName ?? activeProject.name}`;
       await api.orchestration
         .dispatchCommand({
@@ -7523,20 +7526,16 @@ export default function ChatView({
                     </h2>
                   </div>
                   <div className="mx-auto mb-3 flex w-full max-w-3xl items-center justify-center gap-2 px-3">
-                    <button
-                      type="button"
-                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
-                      onClick={() => void handleCreateCliThread("claude")}
-                    >
-                      Claude Code
-                    </button>
-                    <button
-                      type="button"
-                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
-                      onClick={() => void handleCreateCliThread("codex")}
-                    >
-                      Codex
-                    </button>
+                    {TERMINAL_CLI_THREAD_OPTIONS.map(({ cliKind, label }) => (
+                      <button
+                        key={cliKind}
+                        type="button"
+                        className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                        onClick={() => void handleCreateCliThread(cliKind)}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
               </div>

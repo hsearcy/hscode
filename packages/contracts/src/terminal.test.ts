@@ -207,4 +207,18 @@ describe("TerminalEvent", () => {
       }),
     ).toBe(true);
   });
+
+  it("accepts Claudex activity events", () => {
+    expect(
+      decodes(TerminalEvent, {
+        type: "activity",
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        createdAt: new Date().toISOString(),
+        hasRunningSubprocess: true,
+        cliKind: "claudex",
+        agentState: "running",
+      }),
+    ).toBe(true);
+  });
 });

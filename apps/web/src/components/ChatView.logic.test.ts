@@ -16,7 +16,20 @@ import {
   shouldShowComposerModelBootstrapSkeleton,
   shouldStartActiveTurnLayoutGrace,
   shouldRenderTerminalWorkspace,
+  TERMINAL_CLI_THREAD_OPTIONS,
+  terminalCliThreadLabel,
 } from "./ChatView.logic";
+
+describe("terminal CLI thread options", () => {
+  it("offers Claudex as the third new-thread option", () => {
+    expect(TERMINAL_CLI_THREAD_OPTIONS).toEqual([
+      { cliKind: "claude", label: "Claude Code" },
+      { cliKind: "codex", label: "Codex" },
+      { cliKind: "claudex", label: "Claudex" },
+    ]);
+    expect(terminalCliThreadLabel("claudex")).toBe("Claudex");
+  });
+});
 
 describe("voice helpers", () => {
   it("keeps manual titles visible for empty home chats", () => {

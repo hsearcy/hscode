@@ -4,6 +4,7 @@ import {
   type ModelSelection,
   type ProviderKind,
   type ServerProviderAuthStatus,
+  type TerminalCliKind,
   type ThreadId as ThreadIdType,
 } from "@t3tools/contracts";
 import { normalizeModelSlug } from "@t3tools/shared/model";
@@ -34,6 +35,16 @@ import { localSubagentThreadId } from "./ChatView.selectors";
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "dpcode:last-invoked-script-by-project";
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+export const TERMINAL_CLI_THREAD_OPTIONS = [
+  { cliKind: "claude", label: "Claude Code" },
+  { cliKind: "codex", label: "Codex" },
+  { cliKind: "claudex", label: "Claudex" },
+] as const satisfies ReadonlyArray<{ cliKind: TerminalCliKind; label: string }>;
+
+export function terminalCliThreadLabel(cliKind: TerminalCliKind): string {
+  return TERMINAL_CLI_THREAD_OPTIONS.find((option) => option.cliKind === cliKind)!.label;
+}
 
 export function buildLocalDraftThread(
   threadId: ThreadId,

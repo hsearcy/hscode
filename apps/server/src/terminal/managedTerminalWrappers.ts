@@ -7,6 +7,7 @@ import path from "node:path";
 
 import {
   defaultTerminalTitleForCliKind,
+  isClaudeTerminalCliKind,
   managedTerminalCommandNameForCliKind,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_META_OSC_PREFIX,
@@ -17,7 +18,6 @@ import {
 
 export interface ManagedTerminalWrapperState {
   binDir: string | null;
-  codexHomeDir: string | null;
   hookScriptPath: string | null;
   claudeSettingsPath: string | null;
   zshDir: string | null;
@@ -257,28 +257,12 @@ function buildClaudeSettingsJson(notifyHookPath: string): string {
   );
 }
 
-function buildCodexHooksJson(notifyHookPath: string): string {
-  const command = notifyHookPath;
-  return JSON.stringify(
-    {
-      hooks: {
-        UserPromptSubmit: [{ hooks: [{ type: "command", command }] }],
-        Stop: [{ hooks: [{ type: "command", command }] }],
-      },
-    },
-    null,
-    2,
-  );
-}
-
 function buildCodexWrapperScript(input: {
-  codexHomeDir: string;
   notifyHookPath: string;
   targetPath: string;
 }): string {
-  const { codexHomeDir, notifyHookPath, targetPath } = input;
+  const { notifyHookPath, targetPath } = input;
   return [
-    `export CODEX_HOME=${shellQuote(codexHomeDir)}`,
     `if [ -f ${shellQuote(notifyHookPath)} ]; then`,
     "  export CODEX_TUI_RECORD_SESSION=1",
     '  if [ -z "${CODEX_TUI_SESSION_LOG_PATH:-}" ]; then',
@@ -411,17 +395,16 @@ function buildCodexWrapperScript(input: {
 function buildWrapperScript(input: {
   claudeSettingsPath: string;
   cliKind: TerminalCliKind;
-  codexHomeDir: string;
   notifyHookPath: string;
   targetPath: string;
 }): string {
-  const { claudeSettingsPath, cliKind, codexHomeDir, notifyHookPath, targetPath } = input;
+  const { claudeSettingsPath, cliKind, notifyHookPath, targetPath } = input;
   const commandName = managedTerminalCommandNameForCliKind(cliKind);
   const title = defaultTerminalTitleForCliKind(cliKind);
   const commandBody =
-    cliKind === "claude"
+    isClaudeTerminalCliKind(cliKind)
       ? `exec ${shellQuote(targetPath)} --settings ${shellQuote(claudeSettingsPath)} "$@"`
-      : buildCodexWrapperScript({ codexHomeDir, notifyHookPath, targetPath });
+      : buildCodexWrapperScript({ notifyHookPath, targetPath });
   return [
     "#!/bin/sh",
     `# Managed ${commandName} wrapper injected by t3code terminal sessions.`,
@@ -529,7 +512,6 @@ export function prepareManagedTerminalWrappers(options: {
   if (process.platform === "win32") {
     return {
       binDir: null,
-      codexHomeDir: null,
       hookScriptPath: null,
       claudeSettingsPath: null,
       zshDir: null,
@@ -538,6 +520,7 @@ export function prepareManagedTerminalWrappers(options: {
   }
 
   const targetPathByCliKind: Partial<Record<TerminalCliKind, string>> = {};
+  // Claudex stays a user shell alias so it can expand to the managed Claude wrapper.
   for (const cliKind of ["codex", "claude"] as const) {
     const commandName = managedTerminalCommandNameForCliKind(cliKind);
     const targetPath = resolveExecutableOnPath(commandName, options.baseEnv);
@@ -550,7 +533,6 @@ export function prepareManagedTerminalWrappers(options: {
   if (Object.keys(targetPathByCliKind).length === 0) {
     return {
       binDir: null,
-      codexHomeDir: null,
       hookScriptPath: null,
       claudeSettingsPath: null,
       zshDir: null,
@@ -559,17 +541,10 @@ export function prepareManagedTerminalWrappers(options: {
   }
 
   fs.mkdirSync(options.rootDir, { recursive: true });
-  const codexHomeDir = path.join(options.rootDir, "codex-home");
   const hookScriptPath = path.join(options.rootDir, "notify-hook.sh");
   const claudeSettingsPath = path.join(options.rootDir, "claude-settings.json");
-  fs.mkdirSync(codexHomeDir, { recursive: true });
   writeFileIfChanged(hookScriptPath, buildNotifyHookScript(), 0o755);
   writeFileIfChanged(claudeSettingsPath, buildClaudeSettingsJson(hookScriptPath), 0o644);
-  writeFileIfChanged(
-    path.join(codexHomeDir, "hooks.json"),
-    buildCodexHooksJson(hookScriptPath),
-    0o644,
-  );
   for (const [cliKind, targetPath] of Object.entries(targetPathByCliKind) as Array<
     [TerminalCliKind, string]
   >) {
@@ -579,7 +554,6 @@ export function prepareManagedTerminalWrappers(options: {
       buildWrapperScript({
         claudeSettingsPath,
         cliKind,
-        codexHomeDir,
         notifyHookPath: hookScriptPath,
         targetPath,
       }),
@@ -590,7 +564,6 @@ export function prepareManagedTerminalWrappers(options: {
 
   return {
     binDir: options.rootDir,
-    codexHomeDir,
     hookScriptPath,
     claudeSettingsPath,
     zshDir: options.zshRootDir,

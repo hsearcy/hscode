@@ -378,7 +378,7 @@ function WorktreeBadgeGlyph({ className }: { className?: string }) {
 
 function TerminalCliGlyph({ cliKind }: { cliKind: TerminalCliKind | null }) {
   const containerClass = "relative inline-flex size-3.5 shrink-0 items-center justify-center";
-  if (cliKind === "claude") {
+  if (cliKind === "claude" || cliKind === "claudex") {
     return (
       <span className={containerClass}>
         <ClaudeAI aria-hidden="true" className="size-3.5 text-foreground opacity-80" />
