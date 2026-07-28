@@ -277,14 +277,13 @@ function createTerminalCommandIdentity(
 ): TerminalCommandIdentity {
   return {
     cliKind,
-    iconKey: cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
+    iconKey:
+      cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
     title,
   };
 }
 
-export function isClaudeTerminalCliKind(
-  cliKind: TerminalCliKind | null | undefined,
-): boolean {
+export function isClaudeTerminalCliKind(cliKind: TerminalCliKind | null | undefined): boolean {
   return cliKind === "claude" || cliKind === "claudex";
 }
 
@@ -529,7 +528,8 @@ export function resolveTerminalVisualIdentity(input: {
   const state = input.state ?? (input.isRunning ? "running" : "idle");
   return {
     cliKind,
-    iconKey: cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
+    iconKey:
+      cliKind === "codex" ? "openai" : isClaudeTerminalCliKind(cliKind) ? "claude" : "terminal",
     state,
     title,
   };

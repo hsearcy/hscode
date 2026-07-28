@@ -1,3 +1,4 @@
+import type { TerminalActivityUpdate } from "../terminalActivity";
 import {
   type ApprovalRequestId,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -2953,13 +2954,7 @@ export default function ChatView({
         if (!activeThreadId) return;
         storeSetTerminalMetadata(activeThreadId, terminalId, metadata);
       },
-      onTerminalActivityChange: (
-        terminalId: string,
-        activity: {
-          hasRunningSubprocess: boolean;
-          agentState: "running" | "attention" | "review" | null;
-        },
-      ) => {
+      onTerminalActivityChange: (terminalId: string, activity: TerminalActivityUpdate) => {
         if (!activeThreadId) return;
         storeSetTerminalActivity(activeThreadId, terminalId, activity);
       },

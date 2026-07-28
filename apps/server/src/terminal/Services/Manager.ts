@@ -71,6 +71,12 @@ export interface TerminalSessionState {
   managedAgentState: TerminalActivityState | null;
   /** True once at least one hook event (Start/Stop/PermissionRequest) has been observed. */
   managedAgentObserved: boolean;
+  /**
+   * Monotonic count of Stop hook events (completed agent turns). Carried on
+   * activity events so subscribers can see a fresh completion edge even when
+   * the agent-state level did not change (e.g. a lost Start left it "review").
+   */
+  turnCompletionCount: number;
   runtimeEnv: Record<string, string> | null;
   /** Buffered shell input used to detect canonical CLI commands at submit time. */
   pendingInputBuffer: string;

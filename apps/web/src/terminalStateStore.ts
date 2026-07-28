@@ -47,6 +47,12 @@ interface ThreadTerminalState {
   terminalTitleOverridesById: Record<string, string>;
   terminalCliKindsById: Record<string, TerminalCliKind>;
   terminalAttentionStatesById: Record<string, "attention" | "review">;
+  /**
+   * Monotonic completed-turn count per terminal (server bumps it on every
+   * Stop hook). Notification logic uses it to detect a fresh completion even
+   * when the attention state was already "review" before the turn.
+   */
+  terminalTurnCompletionCountsById: Record<string, number>;
   runningTerminalIds: string[];
   activeTerminalId: string;
   terminalGroups: ThreadTerminalGroup[];
@@ -128,6 +134,24 @@ function normalizeTerminalAttentionStates(
         terminalId.length > 0 && (state === "attention" || state === "review"),
     )
     .filter(([terminalId]) => validTerminalIdSet.has(terminalId))
+    .toSorted(([leftId], [rightId]) => leftId.localeCompare(rightId));
+  return Object.fromEntries(normalizedEntries);
+}
+
+function normalizeTerminalTurnCompletionCounts(
+  terminalTurnCompletionCountsById: Record<string, number> | null | undefined,
+  terminalIds: string[],
+): Record<string, number> {
+  const validTerminalIdSet = new Set(terminalIds);
+  const normalizedEntries = Object.entries(terminalTurnCompletionCountsById ?? {})
+    .map(([terminalId, count]) => [terminalId.trim(), count] as const)
+    .filter(
+      ([terminalId, count]) =>
+        terminalId.length > 0 &&
+        Number.isFinite(count) &&
+        count > 0 &&
+        validTerminalIdSet.has(terminalId),
+    )
     .toSorted(([leftId], [rightId]) => leftId.localeCompare(rightId));
   return Object.fromEntries(normalizedEntries);
 }
@@ -334,6 +358,8 @@ function threadTerminalStateEqual(left: ThreadTerminalState, right: ThreadTermin
     JSON.stringify(left.terminalCliKindsById) === JSON.stringify(right.terminalCliKindsById) &&
     JSON.stringify(left.terminalAttentionStatesById) ===
       JSON.stringify(right.terminalAttentionStatesById) &&
+    JSON.stringify(left.terminalTurnCompletionCountsById) ===
+      JSON.stringify(right.terminalTurnCompletionCountsById) &&
     arraysEqual(left.runningTerminalIds, right.runningTerminalIds) &&
     terminalGroupsEqual(left.terminalGroups, right.terminalGroups)
   );
@@ -351,6 +377,7 @@ const DEFAULT_THREAD_TERMINAL_STATE: ThreadTerminalState = Object.freeze({
   terminalTitleOverridesById: {},
   terminalCliKindsById: {},
   terminalAttentionStatesById: {},
+  terminalTurnCompletionCountsById: {},
   runningTerminalIds: [],
   activeTerminalId: DEFAULT_THREAD_TERMINAL_ID,
   terminalGroups: [
@@ -367,6 +394,9 @@ function createDefaultThreadTerminalState(): ThreadTerminalState {
     terminalTitleOverridesById: { ...DEFAULT_THREAD_TERMINAL_STATE.terminalTitleOverridesById },
     terminalCliKindsById: { ...DEFAULT_THREAD_TERMINAL_STATE.terminalCliKindsById },
     terminalAttentionStatesById: { ...DEFAULT_THREAD_TERMINAL_STATE.terminalAttentionStatesById },
+    terminalTurnCompletionCountsById: {
+      ...DEFAULT_THREAD_TERMINAL_STATE.terminalTurnCompletionCountsById,
+    },
     runningTerminalIds: [...DEFAULT_THREAD_TERMINAL_STATE.runningTerminalIds],
     terminalGroups: copyTerminalGroups(DEFAULT_THREAD_TERMINAL_STATE.terminalGroups),
   };
@@ -393,6 +423,10 @@ function normalizeThreadTerminalState(state: ThreadTerminalState): ThreadTermina
   );
   const terminalAttentionStatesById = normalizeTerminalAttentionStates(
     (state as Partial<ThreadTerminalState>).terminalAttentionStatesById,
+    nextTerminalIds,
+  );
+  const terminalTurnCompletionCountsById = normalizeTerminalTurnCompletionCounts(
+    (state as Partial<ThreadTerminalState>).terminalTurnCompletionCountsById,
     nextTerminalIds,
   );
   const ensuredTerminalLabelsById = ensureTerminalLabels({
@@ -443,6 +477,7 @@ function normalizeThreadTerminalState(state: ThreadTerminalState): ThreadTermina
     terminalTitleOverridesById,
     terminalCliKindsById,
     terminalAttentionStatesById,
+    terminalTurnCompletionCountsById,
     runningTerminalIds,
     activeTerminalId,
     terminalGroups: syncedTerminalGroups,
@@ -977,6 +1012,7 @@ function closeThreadTerminal(state: ThreadTerminalState, terminalId: string): Th
     workspaceLayout: normalized.workspaceLayout,
     workspaceActiveTab: normalized.workspaceActiveTab,
     terminalHeight: normalized.terminalHeight,
+    terminalTurnCompletionCountsById: normalized.terminalTurnCompletionCountsById,
     terminalIds: remainingTerminalIds,
     terminalLabelsById: Object.fromEntries(
       Object.entries(normalized.terminalLabelsById).filter(([id]) => id !== terminalId),
@@ -1070,7 +1106,11 @@ function closeThreadWorkspaceChat(state: ThreadTerminalState): ThreadTerminalSta
 function setThreadTerminalActivity(
   state: ThreadTerminalState,
   terminalId: string,
-  activity: { agentState: TerminalActivityState | null; hasRunningSubprocess: boolean },
+  activity: {
+    agentState: TerminalActivityState | null;
+    hasRunningSubprocess: boolean;
+    turnCompletionCount: number | null;
+  },
 ): ThreadTerminalState {
   const normalized = normalizeThreadTerminalState(state);
   if (!normalized.terminalIds.includes(terminalId)) {
@@ -1082,9 +1122,18 @@ function setThreadTerminalActivity(
       ? activity.agentState
       : null;
   const currentTerminalAttentionState = normalized.terminalAttentionStatesById[terminalId] ?? null;
+  const nextTurnCompletionCount =
+    typeof activity.turnCompletionCount === "number" && activity.turnCompletionCount > 0
+      ? activity.turnCompletionCount
+      : null;
+  const currentTurnCompletionCount =
+    normalized.terminalTurnCompletionCountsById[terminalId] ?? null;
+  const turnCompletionCountChanged =
+    nextTurnCompletionCount !== null && nextTurnCompletionCount !== currentTurnCompletionCount;
   if (
     activity.hasRunningSubprocess === alreadyRunning &&
-    nextTerminalAttentionState === currentTerminalAttentionState
+    nextTerminalAttentionState === currentTerminalAttentionState &&
+    !turnCompletionCountChanged
   ) {
     return normalized;
   }
@@ -1100,9 +1149,17 @@ function setThreadTerminalActivity(
   } else {
     terminalAttentionStatesById[terminalId] = nextTerminalAttentionState;
   }
+  const terminalTurnCompletionCountsById =
+    turnCompletionCountChanged && nextTurnCompletionCount !== null
+      ? {
+          ...normalized.terminalTurnCompletionCountsById,
+          [terminalId]: nextTurnCompletionCount,
+        }
+      : normalized.terminalTurnCompletionCountsById;
   return {
     ...normalized,
     terminalAttentionStatesById,
+    terminalTurnCompletionCountsById,
     runningTerminalIds: [...runningTerminalIds],
   };
 }
@@ -1248,7 +1305,11 @@ interface TerminalStateStoreState {
   setTerminalActivity: (
     threadId: ThreadId,
     terminalId: string,
-    activity: { agentState: TerminalActivityState | null; hasRunningSubprocess: boolean },
+    activity: {
+      agentState: TerminalActivityState | null;
+      hasRunningSubprocess: boolean;
+      turnCompletionCount: number | null;
+    },
   ) => void;
   applyWorkspaceLayoutPreset: (
     threadId: ThreadId,

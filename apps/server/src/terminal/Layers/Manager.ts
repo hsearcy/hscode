@@ -1021,6 +1021,9 @@ function resetSessionHistory(session: TerminalSessionState): void {
   session.managedAgentRunning = false;
   session.managedAgentState = null;
   session.managedAgentObserved = false;
+  // turnCompletionCount is intentionally NOT reset: it is monotonic for the
+  // lifetime of the session object (clearing scrollback must not make an old
+  // completion count look fresh again downstream).
 }
 
 function deriveActivityAgentState(session: TerminalSessionState): TerminalActivityState | null {
@@ -1211,6 +1214,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentRunning: false,
           managedAgentState: null,
           managedAgentObserved: false,
+          turnCompletionCount: 0,
           runtimeEnv: normalizedRuntimeEnv(input.env),
           pendingInputBuffer: "",
           pendingOutputChunks: [],
@@ -1365,6 +1369,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentRunning: false,
           managedAgentState: null,
           managedAgentObserved: false,
+          turnCompletionCount: 0,
           runtimeEnv: normalizedRuntimeEnv(input.env),
           pendingInputBuffer: "",
           pendingOutputChunks: [],
@@ -1666,15 +1671,23 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.managedAgentObserved = true;
     const nextManagedAgentRunning = hookEvent !== "Stop";
     const nextManagedAgentState = agentStateFromHookEvent(hookEvent);
-    if (
+    const stateChanged =
       session.managedAgentRunning !== nextManagedAgentRunning ||
-      session.managedAgentState !== nextManagedAgentState
-    ) {
-      session.managedAgentRunning = nextManagedAgentRunning;
-      session.managedAgentState = nextManagedAgentState;
-      session.hasRunningSubprocess = nextManagedAgentRunning;
-      this.emitActivityEvent(session);
+      session.managedAgentState !== nextManagedAgentState;
+    // A Stop is a turn-completion edge, not just a state level: when the
+    // matching Start signal was lost (e.g. the Codex TUI session log format
+    // drifted and the wrapper's turn-start patterns stopped matching), the
+    // session already reads "review" and a change-gated emit would swallow
+    // the completion entirely. Every Stop bumps turnCompletionCount and
+    // emits, so subscribers always see the completed turn.
+    if (!stateChanged && hookEvent !== "Stop") return;
+    session.managedAgentRunning = nextManagedAgentRunning;
+    session.managedAgentState = nextManagedAgentState;
+    session.hasRunningSubprocess = nextManagedAgentRunning;
+    if (hookEvent === "Stop") {
+      session.turnCompletionCount += 1;
     }
+    this.emitActivityEvent(session);
   }
 
   private emitCliMetaSignal(session: TerminalSessionState, cliMeta: CliSessionMetaSignal): void {
@@ -1700,9 +1713,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     // the sink file instead of the PTY stream — ignore any that still leak
     // into PTY output so we don't double-process them.
     if (!session.eventSinkPath) {
-      const latestHookEvent = sanitized.hookEvents.at(-1) ?? null;
-      if (latestHookEvent) {
-        this.applyHookEvent(session, latestHookEvent);
+      // Apply every hook event in order: a Stop is a counted completion edge,
+      // so collapsing a chunk to its last event could drop a Stop that a
+      // Start immediately followed in the same chunk.
+      for (const hookEvent of sanitized.hookEvents) {
+        this.applyHookEvent(session, hookEvent);
       }
       for (const cliMeta of sanitized.cliMetaSignals) {
         this.emitCliMetaSignal(session, cliMeta);
@@ -2304,6 +2319,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       hasRunningSubprocess: session.hasRunningSubprocess,
       cliKind: session.detectedCliKind,
       agentState: deriveActivityAgentState(session),
+      turnCompletionCount: session.turnCompletionCount,
     });
   }
 

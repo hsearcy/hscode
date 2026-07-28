@@ -933,6 +933,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
         entry.callbacks.onTerminalActivityChange(entry.terminalId, {
           hasRunningSubprocess: event.hasRunningSubprocess,
           agentState: event.agentState,
+          turnCompletionCount: event.turnCompletionCount ?? null,
         });
         return;
       }

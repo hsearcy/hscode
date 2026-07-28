@@ -1,3 +1,4 @@
+import type { TerminalActivityUpdate } from "../terminalActivity";
 // FILE: WorkspaceView.tsx
 // Purpose: Render a dedicated terminal-only workspace page backed by a synthetic terminal scope.
 // Layer: Workspace route surface
@@ -352,13 +353,7 @@ export default function WorkspaceView({ workspaceId }: { workspaceId: string }) 
       ) => {
         setTerminalMetadata(threadId, terminalId, metadata);
       },
-      onTerminalActivityChange: (
-        terminalId: string,
-        activity: {
-          hasRunningSubprocess: boolean;
-          agentState: "running" | "attention" | "review" | null;
-        },
-      ) => {
+      onTerminalActivityChange: (terminalId: string, activity: TerminalActivityUpdate) => {
         setTerminalActivity(threadId, terminalId, activity);
       },
       onAddTerminalContext: () => {},

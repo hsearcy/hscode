@@ -1473,10 +1473,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const runPromise = Effect.runPromiseWith(runtimeServices);
 
   const CLI_SUMMARY_TITLE_MAX = 48;
-  const cliManagedTitleByThreadId = new Map<
-    string,
-    { cliKind: TerminalCliKind; title: string }
-  >();
+  const cliManagedTitleByThreadId = new Map<string, { cliKind: TerminalCliKind; title: string }>();
   const isAutoDerivedTerminalTitle = (
     title: string | null | undefined,
     cliKind: TerminalCliKind,

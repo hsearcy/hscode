@@ -41,6 +41,8 @@ interface TerminalNotificationThreadState {
   terminalIds: string[];
   terminalLabelsById: Record<string, string>;
   terminalTitleOverridesById: Record<string, string>;
+  /** Monotonic completed-turn counts; optional for older persisted snapshots. */
+  terminalTurnCompletionCountsById?: Record<string, number>;
 }
 
 export interface CompletedTerminalCandidate {
@@ -195,7 +197,28 @@ export function collectCompletedTerminalCandidates(
     for (const terminalId of terminalIds) {
       const previousState = resolveTerminalNotificationState(previousThreadState, terminalId);
       const nextState = resolveTerminalNotificationState(nextThreadState, terminalId);
-      if (nextState !== "review" || previousState === "review") {
+      // A turn can complete while the stored state already reads "review"
+      // (lost turn-start signal) — the server bumps turnCompletionCount on
+      // every completion, so a fresh count is a completion edge even without
+      // a state transition. Mirrors the MCP webhook gate. Two deliberate
+      // consequences:
+      // - previousCount must already be a number: a first-seen count on an
+      //   already-review terminal is baseline, not fresh (prevents a
+      //   notification storm on upgrade from pre-count persisted snapshots,
+      //   at the cost of swallowing the very first stale-review completion
+      //   per terminal).
+      // - The baseline persists across reloads, so a completion that
+      //   happened while the app was closed fires as a catch-up
+      //   notification when the next activity event delivers the newer
+      //   count — late by design, not a bug.
+      const previousCount = previousThreadState?.terminalTurnCompletionCountsById?.[terminalId];
+      const nextCount = nextThreadState?.terminalTurnCompletionCountsById?.[terminalId];
+      const freshCompletion =
+        typeof nextCount === "number" &&
+        nextCount > 0 &&
+        typeof previousCount === "number" &&
+        nextCount !== previousCount;
+      if (nextState !== "review" || (previousState === "review" && !freshCompletion)) {
         continue;
       }
       const { cliKind, title } = resolveTerminalNotificationTitle(nextThreadState, terminalId);

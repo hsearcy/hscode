@@ -10,6 +10,7 @@ import {
 import {
   buildInputNeededCopy,
   buildTaskCompletionCopy,
+  collectCompletedTerminalCandidates,
   collectCompletedThreadCandidates,
   collectInputNeededThreadCandidates,
 } from "./taskCompletion.logic";
@@ -473,5 +474,86 @@ describe("buildInputNeededCopy", () => {
       title: "Input needed",
       body: "Polish notifications: User input requested.",
     });
+  });
+});
+
+function terminalThreadState(overrides: {
+  terminalAttentionStatesById?: Record<string, "attention" | "review">;
+  runningTerminalIds?: string[];
+  terminalTurnCompletionCountsById?: Record<string, number>;
+}) {
+  return {
+    terminalIds: ["default"],
+    terminalLabelsById: { default: "Terminal 1" },
+    terminalTitleOverridesById: {},
+    terminalCliKindsById: { default: "codex" as const },
+    terminalAttentionStatesById: overrides.terminalAttentionStatesById ?? {},
+    runningTerminalIds: overrides.runningTerminalIds ?? [],
+    terminalTurnCompletionCountsById: overrides.terminalTurnCompletionCountsById ?? {},
+  };
+}
+
+describe("collectCompletedTerminalCandidates", () => {
+  it("notifies on a running-to-review transition", () => {
+    const candidates = collectCompletedTerminalCandidates(
+      { "thread-1": terminalThreadState({ runningTerminalIds: ["default"] }) },
+      {
+        "thread-1": terminalThreadState({
+          terminalAttentionStatesById: { default: "review" },
+          terminalTurnCompletionCountsById: { default: 1 },
+        }),
+      },
+    );
+    expect(candidates.map((candidate) => candidate.terminalId)).toEqual(["default"]);
+  });
+
+  it("notifies a review-to-review completion when the turn count bumps (stale-state regression)", () => {
+    // 2026-07-28 incident: a lost turn-start signal left the state parked in
+    // "review" while the agent worked; the next completion was review-to-review
+    // and the notification was swallowed. A fresh turnCompletionCount is a
+    // completion edge even without a state transition.
+    const candidates = collectCompletedTerminalCandidates(
+      {
+        "thread-1": terminalThreadState({
+          terminalAttentionStatesById: { default: "review" },
+          terminalTurnCompletionCountsById: { default: 1 },
+        }),
+      },
+      {
+        "thread-1": terminalThreadState({
+          terminalAttentionStatesById: { default: "review" },
+          terminalTurnCompletionCountsById: { default: 2 },
+        }),
+      },
+    );
+    expect(candidates.map((candidate) => candidate.terminalId)).toEqual(["default"]);
+  });
+
+  it("stays quiet on review-to-review snapshots with an unchanged count", () => {
+    const state = terminalThreadState({
+      terminalAttentionStatesById: { default: "review" },
+      terminalTurnCompletionCountsById: { default: 2 },
+    });
+    expect(
+      collectCompletedTerminalCandidates({ "thread-1": state }, { "thread-1": state }),
+    ).toEqual([]);
+  });
+
+  it("does not treat a first-seen count on an already-review terminal as fresh", () => {
+    // Previous snapshot predates count tracking (older persisted state).
+    const candidates = collectCompletedTerminalCandidates(
+      {
+        "thread-1": terminalThreadState({
+          terminalAttentionStatesById: { default: "review" },
+        }),
+      },
+      {
+        "thread-1": terminalThreadState({
+          terminalAttentionStatesById: { default: "review" },
+          terminalTurnCompletionCountsById: { default: 5 },
+        }),
+      },
+    );
+    expect(candidates).toEqual([]);
   });
 });

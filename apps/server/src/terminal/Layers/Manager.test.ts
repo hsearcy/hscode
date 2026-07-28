@@ -463,6 +463,74 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("emits a completion activity event for every Stop hook, even from a stale review state", async () => {
+    // Regression for the 2026-07-28 missed Codex webhook: newer Codex TUIs
+    // stopped logging the events the wrapper derived Start signals from, so
+    // the session sat in "review" while the agent kept working (only
+    // subprocess metadata changed). The next genuine completion arrived as a
+    // review→review Stop and the change-gated emit swallowed it entirely.
+    let hasRunningSubprocess = false;
+    const { manager, logsDir } = makeManager(5, {
+      subprocessChecker: async () => hasRunningSubprocess,
+      subprocessPollIntervalMs: 20,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+    const activityEvents = () =>
+      events.filter(
+        (event): event is Extract<TerminalEvent, { type: "activity" }> => event.type === "activity",
+      );
+
+    await manager.open(openInput());
+    // Hook events arrive through the managed event sink file, exactly as the
+    // notify hook delivers them in production.
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    const appendStop = () =>
+      fs.appendFileSync(sinkPath, "\u001b]633;T3CODE_AGENT_EVENT=Stop\u0007\n");
+
+    appendStop();
+    await waitFor(() =>
+      activityEvents().some(
+        (event) => event.agentState === "review" && event.turnCompletionCount === 1,
+      ),
+    );
+
+    // The agent goes back to work, but its Start signal is lost: only
+    // subprocess metadata changes while the stored state stays "review".
+    hasRunningSubprocess = true;
+    await waitFor(
+      () =>
+        activityEvents().some(
+          (event) => event.hasRunningSubprocess && event.agentState === "review",
+        ),
+      1_200,
+    );
+    hasRunningSubprocess = false;
+    await waitFor(() => {
+      const latest = activityEvents().at(-1);
+      return (
+        latest !== undefined &&
+        !latest.hasRunningSubprocess &&
+        latest.agentState === "review" &&
+        latest.turnCompletionCount === 1
+      );
+    }, 1_200);
+
+    // The next completion is a review→review Stop — it must still emit,
+    // carrying a bumped turnCompletionCount.
+    appendStop();
+    await waitFor(() =>
+      activityEvents().some(
+        (event) => event.agentState === "review" && event.turnCompletionCount === 2,
+      ),
+    );
+
+    manager.dispose();
+  });
+
   it("caps persisted history to configured line limit", async () => {
     const { manager, ptyAdapter } = makeManager(3);
     await manager.open(openInput());

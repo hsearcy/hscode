@@ -682,6 +682,7 @@ function EventRouter() {
       useTerminalStateStore.getState().setTerminalActivity(terminalThreadId, event.terminalId, {
         hasRunningSubprocess: activity.hasRunningSubprocess,
         agentState: activity.agentState,
+        turnCompletionCount: activity.turnCompletionCount,
       });
     });
     const unsubWelcome = onServerWelcome((payload) => {

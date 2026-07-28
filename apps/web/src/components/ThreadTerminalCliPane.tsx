@@ -1,3 +1,4 @@
+import type { TerminalActivityUpdate } from "../terminalActivity";
 // FILE: ThreadTerminalCliPane.tsx
 // Purpose: Renders a single persistent PTY viewport for a terminal-cli thread.
 // Layer: Chat surface (terminal-cli mode)
@@ -7,7 +8,6 @@ import { useEffect, useMemo, useRef } from "react";
 
 import type { ThreadId } from "@t3tools/contracts";
 import {
-  type TerminalActivityState,
   type TerminalCliKind,
   defaultTerminalTitleForCliKind,
 } from "@t3tools/shared/terminalThreads";
@@ -64,13 +64,7 @@ export default function ThreadTerminalCliPane({ threadId }: ThreadTerminalCliPan
         ) => {
           setTerminalMetadata(threadId, terminalId, metadata);
         },
-        onTerminalActivityChange: (
-          terminalId: string,
-          activity: {
-            hasRunningSubprocess: boolean;
-            agentState: TerminalActivityState | null;
-          },
-        ) => {
+        onTerminalActivityChange: (terminalId: string, activity: TerminalActivityUpdate) => {
           setTerminalActivity(threadId, terminalId, activity);
         },
       },

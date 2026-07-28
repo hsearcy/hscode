@@ -299,6 +299,7 @@ describe("terminalStateStore actions", () => {
     store.setTerminalActivity(THREAD_ID, "terminal-2", {
       hasRunningSubprocess: true,
       agentState: null,
+      turnCompletionCount: null,
     });
     expect(
       selectThreadTerminalState(useTerminalStateStore.getState().terminalStateByThreadId, THREAD_ID)
@@ -308,11 +309,38 @@ describe("terminalStateStore actions", () => {
     store.setTerminalActivity(THREAD_ID, "terminal-2", {
       hasRunningSubprocess: false,
       agentState: null,
+      turnCompletionCount: null,
     });
     expect(
       selectThreadTerminalState(useTerminalStateStore.getState().terminalStateByThreadId, THREAD_ID)
         .runningTerminalIds,
     ).toEqual([]);
+  });
+
+  it("records per-terminal turn completion counts from activity updates", () => {
+    const store = useTerminalStateStore.getState();
+    store.splitTerminal(THREAD_ID, "terminal-2");
+    store.setTerminalActivity(THREAD_ID, "terminal-2", {
+      hasRunningSubprocess: false,
+      agentState: "review",
+      turnCompletionCount: 1,
+    });
+    expect(
+      selectThreadTerminalState(useTerminalStateStore.getState().terminalStateByThreadId, THREAD_ID)
+        .terminalTurnCompletionCountsById,
+    ).toEqual({ "terminal-2": 1 });
+
+    // A repeated review with a bumped count must still produce a new state
+    // snapshot (this is the completion edge notifications key off).
+    store.setTerminalActivity(THREAD_ID, "terminal-2", {
+      hasRunningSubprocess: false,
+      agentState: "review",
+      turnCompletionCount: 2,
+    });
+    expect(
+      selectThreadTerminalState(useTerminalStateStore.getState().terminalStateByThreadId, THREAD_ID)
+        .terminalTurnCompletionCountsById,
+    ).toEqual({ "terminal-2": 2 });
   });
 
   it("resets to default and clears persisted entry when closing the last terminal", () => {
