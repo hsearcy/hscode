@@ -509,13 +509,15 @@ describe("TerminalManager", () => {
       1_200,
     );
     hasRunningSubprocess = false;
-    await waitFor(
-      () =>
-        activityEvents().some(
-          (event) => !event.hasRunningSubprocess && event.turnCompletionCount === 1,
-        ),
-      1_200,
-    );
+    await waitFor(() => {
+      const latest = activityEvents().at(-1);
+      return (
+        latest !== undefined &&
+        !latest.hasRunningSubprocess &&
+        latest.agentState === "review" &&
+        latest.turnCompletionCount === 1
+      );
+    }, 1_200);
 
     // The next completion is a review→review Stop — it must still emit,
     // carrying a bumped turnCompletionCount.

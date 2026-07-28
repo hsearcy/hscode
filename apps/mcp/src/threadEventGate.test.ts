@@ -156,14 +156,68 @@ describe("createThreadEventGate", () => {
   });
 
   it("does not treat the first observed completion count as fresh after a gate restart", () => {
-    // On MCP restart the gate has no baseline; an idle thread parked in
-    // "review" with a historical count must not page.
+    // On MCP restart the gate has no baseline. The first event still forwards
+    // once via the pre-existing null→review state transition, but the count it
+    // carries must become the baseline — repeated events with the same
+    // historical count must not keep paging as "fresh completions".
     gate.handleActivity(
       activity({ agentState: "review", cliKind: "codex", turnCompletionCount: 7 }),
     );
     gate.handleActivity(
       activity({ agentState: "review", cliKind: "codex", turnCompletionCount: 7 }),
     );
+    expect(forwarded.map((f) => f.state)).toEqual(["review"]);
+  });
+
+  it("tracks completion counts per terminal, not per thread", () => {
+    // A thread can run several agent terminals whose counts interleave.
+    // Terminal B's first completion (count 1) must not be swallowed just
+    // because terminal A already recorded count 1 for the thread.
+    gate.handleActivity(
+      activity({
+        agentState: "review",
+        cliKind: "codex",
+        terminalId: "term-a",
+        turnCompletionCount: 1,
+      }),
+    );
+    expect(forwarded.length).toBe(1); // null→review transition
+    gate.handleActivity(
+      activity({
+        agentState: "review",
+        cliKind: "codex",
+        terminalId: "term-b",
+        turnCompletionCount: 1,
+      }),
+    );
+    gate.handleActivity(
+      activity({
+        agentState: "review",
+        cliKind: "codex",
+        terminalId: "term-b",
+        turnCompletionCount: 2,
+      }),
+    );
+    expect(forwarded.map((f) => f.state)).toEqual(["review", "review"]);
+    // And terminal A's unchanged count must not look fresh because B moved.
+    gate.handleActivity(
+      activity({
+        agentState: "review",
+        cliKind: "codex",
+        terminalId: "term-a",
+        turnCompletionCount: 1,
+      }),
+    );
+    expect(forwarded.length).toBe(2);
+  });
+
+  it("holds claudex fresh-completion reviews to the Claude stabilization window", () => {
+    // Claudex runs the Claude CLI — same stop-hook churn, same hold.
+    gate.handleActivity(
+      activity({ agentState: "review", cliKind: "claudex", turnCompletionCount: 1 }),
+    );
+    expect(forwarded).toEqual([]);
+    vi.advanceTimersByTime(5000);
     expect(forwarded.map((f) => f.state)).toEqual(["review"]);
   });
 

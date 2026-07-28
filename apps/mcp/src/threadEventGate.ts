@@ -40,7 +40,11 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
   const attentionStableMs = options.attentionStableMs ?? DEFAULT_ATTENTION_STABLE_MS;
   const reviewStableMs = options.reviewStableMs ?? DEFAULT_REVIEW_STABLE_MS;
   const lastStateByThread = new Map<string, ThreadAgentState | null>();
-  const lastCompletionCountByThread = new Map<string, number>();
+  // turnCompletionCount is per (thread, terminal) session — a thread can run
+  // several agent terminals whose counts interleave, so keying by thread alone
+  // would both swallow completions (B's count colliding with A's) and page
+  // spuriously (every event looking "fresh").
+  const lastCompletionCountByTerminal = new Map<string, number>();
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function stabilizationMsFor(state: ThreadAgentState | null, cliKind: unknown): number | null {
@@ -48,8 +52,9 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
       return attentionStableMs;
     }
     // Codex's turn-complete signal only fires on genuine completion, so its
-    // review transitions forward immediately, unchanged.
-    if (state === "review" && cliKind === "claude") {
+    // review transitions forward immediately, unchanged. Claudex runs the
+    // Claude CLI and shares its stop-hook churn, so it gets the same hold.
+    if (state === "review" && (cliKind === "claude" || cliKind === "claudex")) {
       return reviewStableMs;
     }
     return null;
@@ -70,9 +75,11 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
       // turn) and re-emits even when the state level did not change. A stale
       // "review" (lost Start signal) would otherwise dedupe the completion
       // away here — treat a fresh count as a genuine review edge.
+      const terminalId = typeof ev.terminalId === "string" ? ev.terminalId : "default";
+      const terminalKey = `${threadId}::${terminalId}`;
       const completionCount =
         typeof ev.turnCompletionCount === "number" ? ev.turnCompletionCount : null;
-      const lastCompletionCount = lastCompletionCountByThread.get(threadId) ?? null;
+      const lastCompletionCount = lastCompletionCountByTerminal.get(terminalKey) ?? null;
       // A null baseline means this is the first event we've seen for the
       // thread (e.g. right after an MCP restart) — record it without treating
       // it as fresh, or every idle thread parked in "review" would page on
@@ -83,7 +90,7 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
         lastCompletionCount !== null &&
         completionCount !== lastCompletionCount;
       if (completionCount !== null) {
-        lastCompletionCountByThread.set(threadId, completionCount);
+        lastCompletionCountByTerminal.set(terminalKey, completionCount);
       }
       if (state === prev && !(freshCompletion && state === "review")) {
         return; // dedupe non-transitions
@@ -118,7 +125,7 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
       }
       pendingTimers.clear();
       lastStateByThread.clear();
-      lastCompletionCountByThread.clear();
+      lastCompletionCountByTerminal.clear();
     },
   };
 }

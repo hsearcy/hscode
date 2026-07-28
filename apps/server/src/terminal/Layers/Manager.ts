@@ -1021,7 +1021,9 @@ function resetSessionHistory(session: TerminalSessionState): void {
   session.managedAgentRunning = false;
   session.managedAgentState = null;
   session.managedAgentObserved = false;
-  session.turnCompletionCount = 0;
+  // turnCompletionCount is intentionally NOT reset: it is monotonic for the
+  // lifetime of the session object (clearing scrollback must not make an old
+  // completion count look fresh again downstream).
 }
 
 function deriveActivityAgentState(session: TerminalSessionState): TerminalActivityState | null {
@@ -1711,9 +1713,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     // the sink file instead of the PTY stream — ignore any that still leak
     // into PTY output so we don't double-process them.
     if (!session.eventSinkPath) {
-      const latestHookEvent = sanitized.hookEvents.at(-1) ?? null;
-      if (latestHookEvent) {
-        this.applyHookEvent(session, latestHookEvent);
+      // Apply every hook event in order: a Stop is a counted completion edge,
+      // so collapsing a chunk to its last event could drop a Stop that a
+      // Start immediately followed in the same chunk.
+      for (const hookEvent of sanitized.hookEvents) {
+        this.applyHookEvent(session, hookEvent);
       }
       for (const cliMeta of sanitized.cliMetaSignals) {
         this.emitCliMetaSignal(session, cliMeta);
