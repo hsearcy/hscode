@@ -200,7 +200,17 @@ export function collectCompletedTerminalCandidates(
       // A turn can complete while the stored state already reads "review"
       // (lost turn-start signal) — the server bumps turnCompletionCount on
       // every completion, so a fresh count is a completion edge even without
-      // a state transition. Mirrors the MCP webhook gate.
+      // a state transition. Mirrors the MCP webhook gate. Two deliberate
+      // consequences:
+      // - previousCount must already be a number: a first-seen count on an
+      //   already-review terminal is baseline, not fresh (prevents a
+      //   notification storm on upgrade from pre-count persisted snapshots,
+      //   at the cost of swallowing the very first stale-review completion
+      //   per terminal).
+      // - The baseline persists across reloads, so a completion that
+      //   happened while the app was closed fires as a catch-up
+      //   notification when the next activity event delivers the newer
+      //   count — late by design, not a bug.
       const previousCount = previousThreadState?.terminalTurnCompletionCountsById?.[terminalId];
       const nextCount = nextThreadState?.terminalTurnCompletionCountsById?.[terminalId];
       const freshCompletion =

@@ -200,9 +200,15 @@ describe("managed terminal wrappers", () => {
       });
     });
 
-    it("emits no Codex CLI metadata for Claude Stop payloads", () => {
-      const sink = runNotifyHook({ hook_event_name: "Stop", session_id: "" });
-      expect(sink).not.toContain("T3CODE_CLI_META=");
+    it("emits only Claude CLI metadata for Claude Stop payloads", () => {
+      // A realistic Claude Stop carries session_id (snake case) and no
+      // thread-id, so exactly one meta line must appear — the Claude one.
+      const sink = runNotifyHook({ hook_event_name: "Stop", session_id: "claude-session-1" });
+      const metaLines = sink.split("\n").filter((line) => line.includes("T3CODE_CLI_META="));
+      expect(metaLines).toHaveLength(1);
+      const encoded = /T3CODE_CLI_META=([A-Za-z0-9+/=]+)/.exec(metaLines[0]!)?.[1];
+      const meta = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8"));
+      expect(meta).toMatchObject({ cliKind: "claude", sessionId: "claude-session-1" });
     });
   });
 
@@ -241,6 +247,20 @@ describe("managed terminal wrappers", () => {
       { encoding: "utf8" },
     ).trim();
     expect(matched).toBe("match");
+
+    // And run the actual cwd extraction the wrapper performs against the same
+    // sample — a broken awk field separator must fail here, not in production.
+    const extracted = execFileSync(
+      "sh",
+      [
+        "-c",
+        `printf '%s\n' "$1" | awk -F'"cwd":"' 'NF > 1 { value=$NF; sub(/".*/, "", value); print value; exit }'`,
+        "sh",
+        sampleLine,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+    expect(extracted).toBe("/home/user/repo");
   });
 
   it("forwards session ids from the current Codex TUI log format", () => {
