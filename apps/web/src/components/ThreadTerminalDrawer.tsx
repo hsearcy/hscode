@@ -1,3 +1,4 @@
+import type { TerminalActivityUpdate } from "../terminalActivity";
 // FILE: ThreadTerminalDrawer.tsx
 // Purpose: Hosts the terminal drawer/workspace chrome and each xterm viewport for a thread.
 // Layer: Chat terminal workspace UI
@@ -6,7 +7,7 @@
 import { SearchAddon } from "@xterm/addon-search";
 import { Plus, SquareSplitHorizontal, SquareSplitVertical, Trash2 } from "~/lib/icons";
 import { type ThreadId } from "@t3tools/contracts";
-import { type TerminalActivityState, type TerminalCliKind } from "@t3tools/shared/terminalThreads";
+import { type TerminalCliKind } from "@t3tools/shared/terminalThreads";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
@@ -63,10 +64,7 @@ interface TerminalViewportProps {
     terminalId: string,
     metadata: { cliKind: TerminalCliKind | null; label: string },
   ) => void;
-  onTerminalActivityChange: (
-    terminalId: string,
-    activity: { hasRunningSubprocess: boolean; agentState: TerminalActivityState | null },
-  ) => void;
+  onTerminalActivityChange: (terminalId: string, activity: TerminalActivityUpdate) => void;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   focusRequestId: number;
   autoFocus: boolean;
@@ -261,10 +259,7 @@ interface ThreadTerminalDrawerProps {
     terminalId: string,
     metadata: { cliKind: TerminalCliKind | null; label: string },
   ) => void;
-  onTerminalActivityChange: (
-    terminalId: string,
-    activity: { hasRunningSubprocess: boolean; agentState: TerminalActivityState | null },
-  ) => void;
+  onTerminalActivityChange: (terminalId: string, activity: TerminalActivityUpdate) => void;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   onTogglePresentationMode?: (() => void) | undefined;
 }

@@ -43,10 +43,29 @@ describe("terminalActivityFromEvent", () => {
     expect(active).toEqual({
       hasRunningSubprocess: true,
       agentState: "running",
+      turnCompletionCount: null,
     });
     expect(attention).toEqual({
       hasRunningSubprocess: true,
       agentState: "attention",
+      turnCompletionCount: null,
+    });
+  });
+
+  it("passes through the server's turn completion count", () => {
+    expect(
+      terminalActivityFromEvent({
+        ...eventBase(),
+        type: "activity",
+        cliKind: "codex",
+        agentState: "review",
+        hasRunningSubprocess: false,
+        turnCompletionCount: 3,
+      }),
+    ).toEqual({
+      hasRunningSubprocess: false,
+      agentState: "review",
+      turnCompletionCount: 3,
     });
   });
 
@@ -61,6 +80,7 @@ describe("terminalActivityFromEvent", () => {
       expect(terminalActivityFromEvent(event)).toEqual({
         hasRunningSubprocess: false,
         agentState: null,
+        turnCompletionCount: null,
       });
     }
   });

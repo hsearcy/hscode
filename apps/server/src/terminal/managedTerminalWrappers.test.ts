@@ -175,6 +175,35 @@ describe("managed terminal wrappers", () => {
       const sink = runNotifyHook({ hook_event_name: "Stop" });
       expect(sink).toContain(HOOK_OSC("Stop"));
     });
+
+    it("forwards thread id and cwd from Codex agent-turn-complete payloads", () => {
+      // Codex's notify payload uses hyphenated keys and is the only channel
+      // that survives TUI log format drift — it must keep session-resume ids
+      // and worktree following alive on its own.
+      const sink = runNotifyHook({
+        type: "agent-turn-complete",
+        "thread-id": "019fa834-3ef8-76c1-a426-d281024a82df",
+        "turn-id": "turn-1",
+        cwd: "/home/user/repo/.worktrees/feature",
+        "last-assistant-message": "done",
+      });
+      expect(sink).toContain(HOOK_OSC("Stop"));
+      const metaLine = sink.split("\n").find((line) => line.includes("T3CODE_CLI_META="));
+      expect(metaLine).toBeDefined();
+      const encoded = /T3CODE_CLI_META=([A-Za-z0-9+/=]+)/.exec(metaLine!)?.[1];
+      expect(encoded).toBeDefined();
+      const meta = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8"));
+      expect(meta).toMatchObject({
+        cliKind: "codex",
+        sessionId: "019fa834-3ef8-76c1-a426-d281024a82df",
+        cwd: "/home/user/repo/.worktrees/feature",
+      });
+    });
+
+    it("emits no Codex CLI metadata for Claude Stop payloads", () => {
+      const sink = runNotifyHook({ hook_event_name: "Stop", session_id: "" });
+      expect(sink).not.toContain("T3CODE_CLI_META=");
+    });
   });
 
   it("emits Start for submitted turns in the current Codex TUI log format", () => {
@@ -197,6 +226,9 @@ describe("managed terminal wrappers", () => {
     const userTurnPattern = `*'"dir":"from_tui"'*'"kind":"op"'*'"UserTurn"'*`;
     const wrapper = fs.readFileSync(path.join(wrapperDir, "codex"), "utf8");
     expect(wrapper).toContain(`${userTurnPattern})`);
+    // The UserTurn payload also carries the turn-context cwd — the only cwd
+    // signal left in this log format (exec events are no longer logged).
+    expect(wrapper).toContain('_t3code_emit_cwd "$_t3code_user_turn_cwd"');
     execFileSync("sh", ["-n", path.join(wrapperDir, "codex")]);
 
     // Prove the glob matches a real line from the current log format (sampled

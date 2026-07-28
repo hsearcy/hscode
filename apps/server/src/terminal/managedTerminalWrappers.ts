@@ -201,6 +201,19 @@ _t3code_emit_claude_meta() {
   _t3code_emit_cli_meta_payload "claude" "$_t3code_session_id" "$_t3code_summary" "$_t3code_cwd"
 }
 
+# Codex's agent-turn-complete notify payload carries the thread id and the
+# turn's cwd (hyphenated keys: "thread-id", "cwd"). Forward them as CLI
+# metadata so session-resume ids and worktree following survive even when the
+# TUI log tail is dead — its format has drifted before and killed both. Claude
+# payloads never carry "thread-id", so this is a no-op for them.
+_t3code_emit_codex_turn_meta() {
+  _t3code_codex_thread_id="$(_t3code_extract_event thread-id)"
+  if [ -z "$_t3code_codex_thread_id" ]; then
+    return
+  fi
+  _t3code_emit_cli_meta_payload "codex" "$_t3code_codex_thread_id" "" "$(_t3code_extract_event cwd)"
+}
+
 case "$_t3code_event" in
   UserPromptSubmit)
     _t3code_emit_osc '${buildHookOscSequence("Start")}'
@@ -215,6 +228,7 @@ case "$_t3code_event" in
   Stop)
     _t3code_emit_osc '${buildHookOscSequence("Stop")}'
     _t3code_emit_claude_meta
+    _t3code_emit_codex_turn_meta
     ;;
   SessionStart)
     _t3code_emit_osc '${buildHookOscSequence("Start")}'
@@ -357,6 +371,15 @@ function buildCodexWrapperScript(input: { notifyHookPath: string; targetPath: st
     // "review" and change-gated completions were swallowed. The submitted
     // UserTurn op is the stable turn-start marker in the current format.
     `        *'"dir":"from_tui"'*'"kind":"op"'*'"UserTurn"'*)`,
+    // The UserTurn payload carries the turn-context cwd after the prompt
+    // items — take the LAST "cwd" occurrence so prompt text that happens to
+    // contain a pasted cwd field cannot shadow the real one. Exec-level cwd
+    // is not logged in this format, so turn-level is the best signal left.
+    `          _t3code_user_turn_cwd=$(printf '%s\n' "$_t3code_line" | awk -F'"cwd":"' 'NF > 1 { value=$NF; sub(/".*/, "", value); print value; exit }')`,
+    '          if [ -n "$_t3code_user_turn_cwd" ] && [ "$_t3code_user_turn_cwd" != "$_t3code_last_cwd" ]; then',
+    '            _t3code_last_cwd="$_t3code_user_turn_cwd"',
+    '            _t3code_emit_cwd "$_t3code_user_turn_cwd"',
+    "          fi",
     '          _t3code_emit_event "Start"',
     "          ;;",
     `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"task_started"'*)`,
