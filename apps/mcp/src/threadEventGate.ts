@@ -40,6 +40,7 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
   const attentionStableMs = options.attentionStableMs ?? DEFAULT_ATTENTION_STABLE_MS;
   const reviewStableMs = options.reviewStableMs ?? DEFAULT_REVIEW_STABLE_MS;
   const lastStateByThread = new Map<string, ThreadAgentState | null>();
+  const lastCompletionCountByThread = new Map<string, number>();
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function stabilizationMsFor(state: ThreadAgentState | null, cliKind: unknown): number | null {
@@ -65,7 +66,28 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
       if (threadId.startsWith("workspace:")) return;
       const state = normalizeState(ev.agentState);
       const prev = lastStateByThread.get(threadId) ?? null;
-      if (state === prev) return; // dedupe non-transitions
+      // The server bumps turnCompletionCount on every Stop hook (completed
+      // turn) and re-emits even when the state level did not change. A stale
+      // "review" (lost Start signal) would otherwise dedupe the completion
+      // away here — treat a fresh count as a genuine review edge.
+      const completionCount =
+        typeof ev.turnCompletionCount === "number" ? ev.turnCompletionCount : null;
+      const lastCompletionCount = lastCompletionCountByThread.get(threadId) ?? null;
+      // A null baseline means this is the first event we've seen for the
+      // thread (e.g. right after an MCP restart) — record it without treating
+      // it as fresh, or every idle thread parked in "review" would page on
+      // startup.
+      const freshCompletion =
+        completionCount !== null &&
+        completionCount > 0 &&
+        lastCompletionCount !== null &&
+        completionCount !== lastCompletionCount;
+      if (completionCount !== null) {
+        lastCompletionCountByThread.set(threadId, completionCount);
+      }
+      if (state === prev && !(freshCompletion && state === "review")) {
+        return; // dedupe non-transitions
+      }
       lastStateByThread.set(threadId, state);
 
       // Any transition invalidates a pending hold — if we were waiting to
@@ -96,6 +118,7 @@ export function createThreadEventGate(options: ThreadEventGateOptions): ThreadEv
       }
       pendingTimers.clear();
       lastStateByThread.clear();
+      lastCompletionCountByThread.clear();
     },
   };
 }

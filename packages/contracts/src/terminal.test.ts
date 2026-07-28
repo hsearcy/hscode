@@ -208,6 +208,21 @@ describe("TerminalEvent", () => {
     ).toBe(true);
   });
 
+  it("accepts activity events carrying a turn completion count", () => {
+    expect(
+      decodes(TerminalEvent, {
+        type: "activity",
+        threadId: "thread-1",
+        terminalId: DEFAULT_TERMINAL_ID,
+        createdAt: new Date().toISOString(),
+        hasRunningSubprocess: false,
+        cliKind: "codex",
+        agentState: "review",
+        turnCompletionCount: 3,
+      }),
+    ).toBe(true);
+  });
+
   it("accepts Claudex activity events", () => {
     expect(
       decodes(TerminalEvent, {

@@ -1021,6 +1021,7 @@ function resetSessionHistory(session: TerminalSessionState): void {
   session.managedAgentRunning = false;
   session.managedAgentState = null;
   session.managedAgentObserved = false;
+  session.turnCompletionCount = 0;
 }
 
 function deriveActivityAgentState(session: TerminalSessionState): TerminalActivityState | null {
@@ -1211,6 +1212,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentRunning: false,
           managedAgentState: null,
           managedAgentObserved: false,
+          turnCompletionCount: 0,
           runtimeEnv: normalizedRuntimeEnv(input.env),
           pendingInputBuffer: "",
           pendingOutputChunks: [],
@@ -1365,6 +1367,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           managedAgentRunning: false,
           managedAgentState: null,
           managedAgentObserved: false,
+          turnCompletionCount: 0,
           runtimeEnv: normalizedRuntimeEnv(input.env),
           pendingInputBuffer: "",
           pendingOutputChunks: [],
@@ -1666,15 +1669,23 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.managedAgentObserved = true;
     const nextManagedAgentRunning = hookEvent !== "Stop";
     const nextManagedAgentState = agentStateFromHookEvent(hookEvent);
-    if (
+    const stateChanged =
       session.managedAgentRunning !== nextManagedAgentRunning ||
-      session.managedAgentState !== nextManagedAgentState
-    ) {
-      session.managedAgentRunning = nextManagedAgentRunning;
-      session.managedAgentState = nextManagedAgentState;
-      session.hasRunningSubprocess = nextManagedAgentRunning;
-      this.emitActivityEvent(session);
+      session.managedAgentState !== nextManagedAgentState;
+    // A Stop is a turn-completion edge, not just a state level: when the
+    // matching Start signal was lost (e.g. the Codex TUI session log format
+    // drifted and the wrapper's turn-start patterns stopped matching), the
+    // session already reads "review" and a change-gated emit would swallow
+    // the completion entirely. Every Stop bumps turnCompletionCount and
+    // emits, so subscribers always see the completed turn.
+    if (!stateChanged && hookEvent !== "Stop") return;
+    session.managedAgentRunning = nextManagedAgentRunning;
+    session.managedAgentState = nextManagedAgentState;
+    session.hasRunningSubprocess = nextManagedAgentRunning;
+    if (hookEvent === "Stop") {
+      session.turnCompletionCount += 1;
     }
+    this.emitActivityEvent(session);
   }
 
   private emitCliMetaSignal(session: TerminalSessionState, cliMeta: CliSessionMetaSignal): void {
@@ -2304,6 +2315,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       hasRunningSubprocess: session.hasRunningSubprocess,
       cliKind: session.detectedCliKind,
       agentState: deriveActivityAgentState(session),
+      turnCompletionCount: session.turnCompletionCount,
     });
   }
 

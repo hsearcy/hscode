@@ -271,10 +271,7 @@ function buildClaudeSettingsJson(notifyHookPath: string): string {
   );
 }
 
-function buildCodexWrapperScript(input: {
-  notifyHookPath: string;
-  targetPath: string;
-}): string {
+function buildCodexWrapperScript(input: { notifyHookPath: string; targetPath: string }): string {
   const { notifyHookPath, targetPath } = input;
   return [
     `if [ -f ${shellQuote(notifyHookPath)} ]; then`,
@@ -354,6 +351,14 @@ function buildCodexWrapperScript(input: {
     `          [ -n "$_t3code_new_session_id" ] || _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'"conversation_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
     '          _t3code_emit_session_id "$_t3code_new_session_id"',
     "          ;;",
+    // Newer Codex TUIs stopped logging '"kind":"codex_event"' lines entirely
+    // (turn lifecycle no longer appears as task_started/exec_command_begin),
+    // which silently killed every Start signal: the session state stuck at
+    // "review" and change-gated completions were swallowed. The submitted
+    // UserTurn op is the stable turn-start marker in the current format.
+    `        *'"dir":"from_tui"'*'"kind":"op"'*'"UserTurn"'*)`,
+    '          _t3code_emit_event "Start"',
+    "          ;;",
     `        *'"dir":"to_tui"'*'"kind":"codex_event"'*'"msg":{"type":"task_started"'*)`,
     `          _t3code_turn_id=$(printf '%s\n' "$_t3code_line" | awk -F'"turn_id":"' 'NF > 1 { sub(/".*/, "", $2); print $2; exit }')`,
     '          [ -n "$_t3code_turn_id" ] || _t3code_turn_id="task_started"',
@@ -415,10 +420,9 @@ function buildWrapperScript(input: {
   const { claudeSettingsPath, cliKind, notifyHookPath, targetPath } = input;
   const commandName = managedTerminalCommandNameForCliKind(cliKind);
   const title = defaultTerminalTitleForCliKind(cliKind);
-  const commandBody =
-    isClaudeTerminalCliKind(cliKind)
-      ? `exec ${shellQuote(targetPath)} --settings ${shellQuote(claudeSettingsPath)} "$@"`
-      : buildCodexWrapperScript({ notifyHookPath, targetPath });
+  const commandBody = isClaudeTerminalCliKind(cliKind)
+    ? `exec ${shellQuote(targetPath)} --settings ${shellQuote(claudeSettingsPath)} "$@"`
+    : buildCodexWrapperScript({ notifyHookPath, targetPath });
   return [
     "#!/bin/sh",
     `# Managed ${commandName} wrapper injected by t3code terminal sessions.`,

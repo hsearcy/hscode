@@ -137,6 +137,12 @@ const TerminalActivityEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("activity"),
   hasRunningSubprocess: Schema.Boolean,
+  // Monotonic count of completed agent turns (Stop hook events) for this
+  // terminal session. Lets subscribers detect a fresh turn completion even
+  // when agentState reads "review" both before and after the turn — the
+  // state level can be stale (e.g. a lost Start signal) while the completion
+  // edge is still real. Optional so older peers keep decoding.
+  turnCompletionCount: Schema.optional(Schema.Int),
   cliKind: Schema.NullOr(
     Schema.Union([Schema.Literal("codex"), Schema.Literal("claude"), Schema.Literal("claudex")]),
   ),

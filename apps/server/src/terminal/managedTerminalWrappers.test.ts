@@ -68,9 +68,7 @@ describe("managed terminal wrappers", () => {
 
     const output = execFileSync(path.join(wrapperDir, "codex"), {
       encoding: "utf8",
-      env: Object.fromEntries(
-        Object.entries(process.env).filter(([key]) => key !== "CODEX_HOME"),
-      ),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "CODEX_HOME")),
     });
 
     expect(output.endsWith("unset")).toBe(true);
@@ -177,6 +175,40 @@ describe("managed terminal wrappers", () => {
       const sink = runNotifyHook({ hook_event_name: "Stop" });
       expect(sink).toContain(HOOK_OSC("Stop"));
     });
+  });
+
+  it("emits Start for submitted turns in the current Codex TUI log format", () => {
+    // Newer Codex TUIs log no '"kind":"codex_event"' lines at all, so the
+    // task_started/exec_command_begin patterns stopped matching and Start
+    // signals vanished — sessions stuck in "review" while the agent worked.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-codex-user-turn-"));
+    tempDirs.push(tempDir);
+    const sourceBinDir = path.join(tempDir, "source-bin");
+    const wrapperDir = path.join(tempDir, "wrappers");
+    fs.mkdirSync(sourceBinDir);
+    fs.writeFileSync(path.join(sourceBinDir, "codex"), "#!/bin/sh\n", { mode: 0o755 });
+
+    prepareManagedTerminalWrappers({
+      baseEnv: { PATH: sourceBinDir },
+      rootDir: wrapperDir,
+      zshRootDir: path.join(tempDir, "zsh"),
+    });
+
+    const userTurnPattern = `*'"dir":"from_tui"'*'"kind":"op"'*'"UserTurn"'*`;
+    const wrapper = fs.readFileSync(path.join(wrapperDir, "codex"), "utf8");
+    expect(wrapper).toContain(`${userTurnPattern})`);
+    execFileSync("sh", ["-n", path.join(wrapperDir, "codex")]);
+
+    // Prove the glob matches a real line from the current log format (sampled
+    // from a live Codex session on 2026-07-28).
+    const sampleLine =
+      '{"ts":"2026-07-28T14:49:11.974Z","dir":"from_tui","kind":"op","payload":{"UserTurn":{"items":[{"type":"text","text":"What is the next performance fix?","text_elements":[]}],"cwd":"/home/user/repo"}}}';
+    const matched = execFileSync(
+      "sh",
+      ["-c", `case "$1" in ${userTurnPattern}) echo match;; *) echo miss;; esac`, "sh", sampleLine],
+      { encoding: "utf8" },
+    ).trim();
+    expect(matched).toBe("match");
   });
 
   it("forwards session ids from the current Codex TUI log format", () => {
