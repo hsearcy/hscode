@@ -125,7 +125,13 @@ describe("managed terminal wrappers", () => {
   describe("Claude notify hook signal mapping", () => {
     const HOOK_OSC = (eventType: string) => `]633;T3CODE_AGENT_EVENT=${eventType}`;
 
-    function runNotifyHook(payload: Record<string, unknown>): string {
+    function runNotifyHook(
+      payload: Record<string, unknown>,
+      options: {
+        env?: Record<string, string>;
+        mainThreadId?: string;
+      } = {},
+    ): string {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "hscode-notify-hook-"));
       tempDirs.push(tempDir);
       const sourceBinDir = path.join(tempDir, "source-bin");
@@ -140,9 +146,18 @@ describe("managed terminal wrappers", () => {
 
       const sinkPath = path.join(tempDir, "events.sink");
       fs.writeFileSync(sinkPath, "");
+      const tuiLogPath = path.join(tempDir, "tui-session.jsonl");
+      if (options.mainThreadId !== undefined) {
+        fs.writeFileSync(`${tuiLogPath}.main-thread-id`, options.mainThreadId);
+      }
       execFileSync("sh", [state.hookScriptPath!], {
         input: JSON.stringify(payload),
-        env: { ...process.env, T3CODE_TERMINAL_EVENT_SINK: sinkPath },
+        env: {
+          ...process.env,
+          T3CODE_TERMINAL_EVENT_SINK: sinkPath,
+          CODEX_TUI_SESSION_LOG_PATH: tuiLogPath,
+          ...options.env,
+        },
       });
       return fs.readFileSync(sinkPath, "utf8");
     }
@@ -200,6 +215,79 @@ describe("managed terminal wrappers", () => {
       });
     });
 
+    it("drops subagent turn completions whose thread-id differs from the terminal's", () => {
+      // Regression (2026-07-29): Codex fires notify for reviewer/subagent
+      // threads too. Their Stops flipped the parent thread to review mid-turn
+      // (spurious completion webhooks at 15:24/15:29Z) and their CliMeta
+      // overwrote the persisted resume session id with a subagent id.
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+          cwd: "/home/user/repo",
+        },
+        { mainThreadId: "019fa834-3ef8-76c1-a426-d281024a82df" },
+      );
+      expect(sink).toBe("");
+    });
+
+    it("still forwards the terminal's own turn completions when the main-thread file matches", () => {
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fa834-3ef8-76c1-a426-d281024a82df",
+          cwd: "/home/user/repo",
+        },
+        { mainThreadId: "019fa834-3ef8-76c1-a426-d281024a82df" },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+      expect(sink).toContain("T3CODE_CLI_META=");
+    });
+
+    it("fails open when the recorded main-thread id file is empty", () => {
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+          cwd: "/home/user/repo",
+        },
+        { mainThreadId: "" },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
+    it("fails open when CODEX_TUI_SESSION_LOG_PATH is unset (unmanaged session)", () => {
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+          cwd: "/home/user/repo",
+        },
+        { env: { CODEX_TUI_SESSION_LOG_PATH: "" } },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
+    it("fails open when no main-thread id has been recorded (dead watcher)", () => {
+      // The notify channel is the resilience path for TUI-log drift; if the
+      // watcher never recorded an id, keep forwarding rather than going
+      // silent (at the cost of possible subagent noise).
+      const sink = runNotifyHook({
+        type: "agent-turn-complete",
+        "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+        cwd: "/home/user/repo",
+      });
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
+    it("leaves Claude payloads unaffected by the Codex thread-id filter", () => {
+      const sink = runNotifyHook(
+        { hook_event_name: "Stop", session_id: "claude-session-1" },
+        { mainThreadId: "019fa834-3ef8-76c1-a426-d281024a82df" },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
     it("emits only Claude CLI metadata for Claude Stop payloads", () => {
       // A realistic Claude Stop carries session_id (snake case) and no
       // thread-id, so exactly one meta line must appear — the Claude one.
@@ -232,6 +320,32 @@ describe("managed terminal wrappers", () => {
     const userTurnPattern = `*'"dir":"from_tui"'*'"kind":"op"'*'"UserTurn"'*`;
     const wrapper = fs.readFileSync(path.join(wrapperDir, "codex"), "utf8");
     expect(wrapper).toContain(`${userTurnPattern})`);
+    // The watcher must record the terminal's own thread id so the notify hook
+    // can drop subagent completions carrying foreign thread-ids. Assert the
+    // write sits inside _t3code_emit_session_id AFTER the id assignment (a
+    // reorder would record stale/empty ids), and that it is atomic
+    // (write-then-rename) so a concurrent notify hook never reads a
+    // truncated id.
+    const emitterStart = wrapper.indexOf("_t3code_emit_session_id() {");
+    const idAssignment = wrapper.indexOf(
+      '_t3code_session_id="$_t3code_new_session_id"',
+      emitterStart,
+    );
+    const tmpWrite = wrapper.indexOf(
+      '> "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp"',
+      emitterStart,
+    );
+    const rename = wrapper.indexOf(
+      'mv -f "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp" "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id"',
+      emitterStart,
+    );
+    expect(emitterStart).toBeGreaterThan(-1);
+    expect(idAssignment).toBeGreaterThan(emitterStart);
+    expect(tmpWrite).toBeGreaterThan(idAssignment);
+    expect(rename).toBeGreaterThan(tmpWrite);
+    // Replay the log from line one — `-n 0` could attach after the session-id
+    // lines and leave the filter permanently inert.
+    expect(wrapper).toContain('tail -n +1 -F "$_t3code_log"');
     // The UserTurn payload also carries the turn-context cwd — the only cwd
     // signal left in this log format (exec events are no longer logged).
     expect(wrapper).toContain('_t3code_emit_cwd "$_t3code_user_turn_cwd"');
