@@ -127,7 +127,7 @@ fi
 # working at the cost of possible subagent noise.
 _t3code_payload_thread_id="$(_t3code_extract_event thread-id)"
 if [ -n "$_t3code_payload_thread_id" ] && [ -n "\${CODEX_TUI_SESSION_LOG_PATH:-}" ] && [ -s "\${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" ]; then
-  _t3code_main_thread_id="$(cat "\${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null)"
+  _t3code_main_thread_id="$(cat "\${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null || true)"
   if [ -n "$_t3code_main_thread_id" ] && [ "$_t3code_payload_thread_id" != "$_t3code_main_thread_id" ]; then
     exit 0
   fi
@@ -338,7 +338,10 @@ function buildCodexWrapperScript(input: { notifyHookPath: string; targetPath: st
     "      # subagent/reviewer turn completions (their payloads carry foreign",
     "      # thread-ids). Rewritten on change so an in-place /new session keeps",
     "      # matching.",
-    '      printf \'%s\' "$_t3code_session_id" > "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null || true',
+    // Write-then-rename so a concurrently running notify hook never reads a
+    // truncated id (which would drop the terminal's own completion).
+    '      printf \'%s\' "$_t3code_session_id" > "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp" 2>/dev/null || true',
+    '      mv -f "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp" "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null || true',
     `      _t3code_meta_payload=$(printf '{"hook_event_name":"CliMeta","cli_kind":"codex","session_id":"%s","cwd":"%s"}' "$_t3code_session_id" "$_t3code_last_cwd")`,
     '      "$_t3code_notify" "$_t3code_meta_payload" >/dev/null 2>&1 || true',
     "    }",
@@ -369,7 +372,12 @@ function buildCodexWrapperScript(input: { notifyHookPath: string; targetPath: st
     "      exit 0",
     "    fi",
     "",
-    '    tail -n 0 -F "$_t3code_log" 2>/dev/null | while IFS= read -r _t3code_line; do',
+    // Replay from the first line: the log is created fresh for this run, and
+    // Codex writes the session-id lines within milliseconds of creating it —
+    // `-n 0` could attach just after them and never learn the thread id,
+    // leaving the subagent filter permanently inert. Early replays are safe:
+    // every emitter below dedupes on change.
+    '    tail -n +1 -F "$_t3code_log" 2>/dev/null | while IFS= read -r _t3code_line; do',
     '      case "$_t3code_line" in',
     `        *'"dir":"to_tui"'*'"kind":"app_event"'*'thread_id: ThreadId { uuid: '*)`,
     `          _t3code_new_session_id=$(printf '%s\n' "$_t3code_line" | awk -F'thread_id: ThreadId { uuid: ' 'NF > 1 { sub(/[^0-9a-fA-F-].*/, "", $2); print $2; exit }')`,

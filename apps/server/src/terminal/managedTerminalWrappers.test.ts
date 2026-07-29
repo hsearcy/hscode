@@ -244,6 +244,30 @@ describe("managed terminal wrappers", () => {
       expect(sink).toContain("T3CODE_CLI_META=");
     });
 
+    it("fails open when the recorded main-thread id file is empty", () => {
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+          cwd: "/home/user/repo",
+        },
+        { mainThreadId: "" },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
+    it("fails open when CODEX_TUI_SESSION_LOG_PATH is unset (unmanaged session)", () => {
+      const sink = runNotifyHook(
+        {
+          type: "agent-turn-complete",
+          "thread-id": "019fae7f-0667-7c03-a81e-27fb5ab201cd",
+          cwd: "/home/user/repo",
+        },
+        { env: { CODEX_TUI_SESSION_LOG_PATH: "" } },
+      );
+      expect(sink).toContain(HOOK_OSC("Stop"));
+    });
+
     it("fails open when no main-thread id has been recorded (dead watcher)", () => {
       // The notify channel is the resilience path for TUI-log drift; if the
       // watcher never recorded an id, keep forwarding rather than going
@@ -297,8 +321,31 @@ describe("managed terminal wrappers", () => {
     const wrapper = fs.readFileSync(path.join(wrapperDir, "codex"), "utf8");
     expect(wrapper).toContain(`${userTurnPattern})`);
     // The watcher must record the terminal's own thread id so the notify hook
-    // can drop subagent completions carrying foreign thread-ids.
-    expect(wrapper).toContain('> "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id"');
+    // can drop subagent completions carrying foreign thread-ids. Assert the
+    // write sits inside _t3code_emit_session_id AFTER the id assignment (a
+    // reorder would record stale/empty ids), and that it is atomic
+    // (write-then-rename) so a concurrent notify hook never reads a
+    // truncated id.
+    const emitterStart = wrapper.indexOf("_t3code_emit_session_id() {");
+    const idAssignment = wrapper.indexOf(
+      '_t3code_session_id="$_t3code_new_session_id"',
+      emitterStart,
+    );
+    const tmpWrite = wrapper.indexOf(
+      '> "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp"',
+      emitterStart,
+    );
+    const rename = wrapper.indexOf(
+      'mv -f "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id.tmp" "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id"',
+      emitterStart,
+    );
+    expect(emitterStart).toBeGreaterThan(-1);
+    expect(idAssignment).toBeGreaterThan(emitterStart);
+    expect(tmpWrite).toBeGreaterThan(idAssignment);
+    expect(rename).toBeGreaterThan(tmpWrite);
+    // Replay the log from line one — `-n 0` could attach after the session-id
+    // lines and leave the filter permanently inert.
+    expect(wrapper).toContain('tail -n +1 -F "$_t3code_log"');
     // The UserTurn payload also carries the turn-context cwd — the only cwd
     // signal left in this log format (exec events are no longer logged).
     expect(wrapper).toContain('_t3code_emit_cwd "$_t3code_user_turn_cwd"');
