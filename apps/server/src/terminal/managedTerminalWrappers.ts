@@ -116,6 +116,23 @@ if [ -z "$_t3code_event" ]; then
   esac
 fi
 
+# Codex fires notify for EVERY thread completing inside the process —
+# including reviewer/subagent threads — each with its own "thread-id". A
+# subagent completion is not this terminal's turn ending: forwarding it flips
+# the thread to "review" mid-turn (spurious completion webhooks) and its
+# CliMeta clobbers the persisted resume session id with a subagent id. The
+# TUI-log watcher records the terminal's own thread id in a side file; drop
+# any Codex payload whose thread-id disagrees. When the file is missing (dead
+# watcher, unmanaged session) we fail open so the turn-complete channel keeps
+# working at the cost of possible subagent noise.
+_t3code_payload_thread_id="$(_t3code_extract_event thread-id)"
+if [ -n "$_t3code_payload_thread_id" ] && [ -n "\${CODEX_TUI_SESSION_LOG_PATH:-}" ] && [ -s "\${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" ]; then
+  _t3code_main_thread_id="$(cat "\${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null)"
+  if [ -n "$_t3code_main_thread_id" ] && [ "$_t3code_payload_thread_id" != "$_t3code_main_thread_id" ]; then
+    exit 0
+  fi
+fi
+
 _t3code_emit_osc() {
   _t3code_sequence="$1"
   # Primary channel: a side file the server tails (T3CODE_TERMINAL_EVENT_SINK).
@@ -317,6 +334,11 @@ function buildCodexWrapperScript(input: { notifyHookPath: string; targetPath: st
     '      [ -n "$_t3code_new_session_id" ] || return',
     '      [ "$_t3code_new_session_id" != "$_t3code_session_id" ] || return',
     '      _t3code_session_id="$_t3code_new_session_id"',
+    "      # Record this terminal's own thread id so the notify hook can drop",
+    "      # subagent/reviewer turn completions (their payloads carry foreign",
+    "      # thread-ids). Rewritten on change so an in-place /new session keeps",
+    "      # matching.",
+    '      printf \'%s\' "$_t3code_session_id" > "${CODEX_TUI_SESSION_LOG_PATH}.main-thread-id" 2>/dev/null || true',
     `      _t3code_meta_payload=$(printf '{"hook_event_name":"CliMeta","cli_kind":"codex","session_id":"%s","cwd":"%s"}' "$_t3code_session_id" "$_t3code_last_cwd")`,
     '      "$_t3code_notify" "$_t3code_meta_payload" >/dev/null 2>&1 || true',
     "    }",
