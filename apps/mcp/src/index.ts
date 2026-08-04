@@ -21,7 +21,13 @@ import { z } from "zod";
 import { CliTranscriptLocator, readLastTurn } from "@t3tools/shared/cliTranscript";
 import { resolveCodexHome } from "@t3tools/shared/codexConfig";
 import { CodexSessionMetadataReader } from "@t3tools/shared/codexSessionMetadata";
-import { composerDraft, lastAssistantTurn, lastMeaningfulLines, renderTerminal } from "./ansi.ts";
+import {
+  composerDraft,
+  lastAssistantTurn,
+  lastMeaningfulLines,
+  renderOptionsForSnapshot,
+  renderTerminal,
+} from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
@@ -250,7 +256,7 @@ async function fanOutThreadEvent(input: {
         cwd: row.worktreePath ?? row.workspaceRoot,
         wake: false,
       });
-      renderedText = await renderTerminal(snap.history);
+      renderedText = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
     } catch {
       // Best-effort.
     }
@@ -451,7 +457,7 @@ function registerTools(server: McpServer): void {
         cwd: row.worktreePath ?? row.workspaceRoot,
         wake: false,
       });
-      const text = await renderTerminal(snap.history);
+      const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
       const tail = lastMeaningfulLines(text, args.lines ?? 80);
       const activity = ws.getActivity(row.threadId);
       const kind = CliTranscriptLocator.kindOf(row.cliKind);
@@ -655,7 +661,7 @@ function registerTools(server: McpServer): void {
         wake: false,
       });
       if (peek.status === "slept") {
-        const sleptText = await renderTerminal(peek.history);
+        const sleptText = await renderTerminal(peek.history, renderOptionsForSnapshot(peek));
         return {
           content: [
             {
@@ -699,7 +705,7 @@ function registerTools(server: McpServer): void {
         cwd: row.worktreePath ?? row.workspaceRoot,
         wake: false,
       });
-      const text = await renderTerminal(snap.history);
+      const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
       return {
         content: [
           {
@@ -790,7 +796,7 @@ function registerTools(server: McpServer): void {
           if (peek.status === "slept") {
             // Slept = the CLI finished its last turn and was idle long
             // enough to be put to sleep. Report idleness immediately.
-            const sleptText = await renderTerminal(peek.history);
+            const sleptText = await renderTerminal(peek.history, renderOptionsForSnapshot(peek));
             payload = {
               threadId: row.threadId,
               threadTitle: row.title,
@@ -815,7 +821,7 @@ function registerTools(server: McpServer): void {
               cwd: row.worktreePath ?? row.workspaceRoot,
               wake: false,
             });
-            const text = await renderTerminal(snap.history);
+            const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
             const screen = lastMeaningfulLines(text, 80);
             const state = activity?.agentState ?? null;
             payload = {
