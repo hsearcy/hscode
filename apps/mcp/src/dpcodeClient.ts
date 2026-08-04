@@ -261,6 +261,10 @@ export interface TerminalSessionSnapshot {
   status: "starting" | "running" | "exited" | "error";
   pid: number | null;
   history: string;
+  /** Live PTY dimensions — absent from snapshots of older servers. Renderers
+   * must replay `history` at exactly this size or the viewport garbles. */
+  cols?: number;
+  rows?: number;
   exitCode: number | null;
   exitSignal: number | null;
   updatedAt: string;

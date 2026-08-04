@@ -18,7 +18,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { lastAssistantTurn, lastMeaningfulLines, renderTerminal } from "./ansi.ts";
+import {
+  lastAssistantTurn,
+  lastMeaningfulLines,
+  renderOptionsForSnapshot,
+  renderTerminal,
+} from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
@@ -244,7 +249,7 @@ async function fanOutThreadEvent(input: {
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
       });
-      renderedText = await renderTerminal(snap.history);
+      renderedText = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
     } catch {
       // Best-effort.
     }
@@ -406,7 +411,7 @@ function registerTools(server: McpServer): void {
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
       });
-      const text = await renderTerminal(snap.history);
+      const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
       const tail = lastMeaningfulLines(text, args.lines ?? 80);
       const activity = ws.getActivity(row.threadId);
       return {
@@ -569,7 +574,7 @@ function registerTools(server: McpServer): void {
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
       });
-      const text = await renderTerminal(snap.history);
+      const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
       return {
         content: [
           {
@@ -653,7 +658,7 @@ function registerTools(server: McpServer): void {
             threadId: row.threadId,
             cwd: row.worktreePath ?? row.workspaceRoot,
           });
-          const text = await renderTerminal(snap.history);
+          const text = await renderTerminal(snap.history, renderOptionsForSnapshot(snap));
           const screen = lastMeaningfulLines(text, 80);
           const state = activity?.agentState ?? null;
           payload = {

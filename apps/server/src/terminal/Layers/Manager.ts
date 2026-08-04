@@ -2304,6 +2304,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       status: session.status,
       pid: session.pid,
       history: session.history,
+      cols: session.cols,
+      rows: session.rows,
       exitCode: session.exitCode,
       exitSignal: session.exitSignal,
       updatedAt: session.updatedAt,

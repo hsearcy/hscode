@@ -10,6 +10,22 @@ export interface RenderOptions {
   scrollback?: number;
 }
 
+// The history stream is raw PTY bytes recorded at the live terminal's size —
+// TUIs position the cursor absolutely within that width, so replaying into a
+// differently sized headless terminal clamps those moves and garbles the most
+// recent viewport (the exact "last output" callers ask about). Always render
+// at the snapshot's real dimensions; the defaults only cover older servers
+// whose snapshots predate the cols/rows fields.
+export function renderOptionsForSnapshot(snapshot: {
+  cols?: number | undefined;
+  rows?: number | undefined;
+}): RenderOptions {
+  return {
+    cols: snapshot.cols ?? 120,
+    rows: snapshot.rows ?? 40,
+  };
+}
+
 export async function renderTerminal(input: string, opts: RenderOptions = {}): Promise<string> {
   const cols = opts.cols ?? 120;
   const rows = opts.rows ?? 40;
