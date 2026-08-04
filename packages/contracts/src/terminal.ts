@@ -85,6 +85,12 @@ export const TerminalSessionSnapshot = Schema.Struct({
   status: TerminalSessionStatus,
   pid: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   history: Schema.String,
+  // Live PTY dimensions. `history` is a raw escape-sequence stream recorded at
+  // this width — replaying it into a differently sized headless terminal
+  // garbles the cursor-addressed viewport (the most recent output). Optional
+  // so older peers keep decoding.
+  cols: Schema.optional(TerminalColsSchema),
+  rows: Schema.optional(TerminalRowsSchema),
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
   updatedAt: Schema.String,

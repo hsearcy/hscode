@@ -230,6 +230,10 @@ describe("TerminalManager", () => {
 
     expect(first.threadId).toBe("thread-1");
     expect(first.terminalId).toBe("default");
+    // Snapshots must carry the live PTY size — renderers replay the raw
+    // history stream and garble the viewport at any other width.
+    expect(first.cols).toBe(100);
+    expect(first.rows).toBe(24);
     expect(second.threadId).toBe("thread-1");
     expect(third.threadId).toBe("thread-1");
     expect(ptyAdapter.spawnInputs).toHaveLength(1);

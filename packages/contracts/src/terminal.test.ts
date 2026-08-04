@@ -208,6 +208,22 @@ describe("TerminalEvent", () => {
     ).toBe(true);
   });
 
+  it("accepts session snapshots with and without live PTY dimensions", () => {
+    const base = {
+      threadId: "thread-1",
+      terminalId: DEFAULT_TERMINAL_ID,
+      cwd: "/tmp",
+      status: "running",
+      pid: 1234,
+      history: "",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: new Date().toISOString(),
+    };
+    expect(decodes(TerminalSessionSnapshot, base)).toBe(true);
+    expect(decodes(TerminalSessionSnapshot, { ...base, cols: 190, rows: 52 })).toBe(true);
+  });
+
   it("accepts activity events carrying a turn completion count", () => {
     expect(
       decodes(TerminalEvent, {
