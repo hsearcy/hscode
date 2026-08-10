@@ -240,9 +240,12 @@ async function fanOutThreadEvent(input: {
   const needsScreen = Array.from(subscriptions.values()).some((s) => s.screenScope !== "off");
   if (needsScreen && row) {
     try {
+      // Peek only — rendering a notification screen must not wake a slept
+      // CLI session.
       const snap = await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
       });
       renderedText = await renderTerminal(snap.history);
     } catch {
@@ -402,9 +405,11 @@ function registerTools(server: McpServer): void {
     },
     async (args: { thread: string; lines?: number }) => {
       const row = resolveThread(args.thread);
+      // Peek only — reading a thread must not wake a slept CLI session.
       const snap = await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
       });
       const text = await renderTerminal(snap.history);
       const tail = lastMeaningfulLines(text, args.lines ?? 80);
@@ -452,10 +457,16 @@ function registerTools(server: McpServer): void {
     async (args: { thread: string; text: string; submit?: boolean }) => {
       const row = resolveThread(args.thread);
       // Ensure the terminal session is alive (server will resume the CLI if needed).
-      await ws.openTerminal({
+      const openSnap = await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
       });
+      if (openSnap.wokeFromSleep) {
+        // The open() respawned a slept PTY and the server typed the CLI
+        // resume command, but the CLI needs a few seconds to boot. Writing
+        // immediately would land the text in the shell or a half-drawn TUI.
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+      }
       const submit = args.submit ?? true;
       // Treat trailing \n or \r as "already terminated" so we don't append a
       // second submit byte. Claude Code's TUI parses `\n` as a soft newline
@@ -505,14 +516,23 @@ function registerTools(server: McpServer): void {
     },
     async (args: { thread: string; count?: number }) => {
       const row = resolveThread(args.thread);
-      // Ensure the terminal session is alive (server will resume the CLI if needed).
+      // Peek only — a slept session has nothing to interrupt, and waking a
+      // CLI just to Ctrl+C it would be counterproductive. Writes to a slept
+      // session are silently dropped by the server.
       await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
       });
       const count = args.count ?? 1;
       const data = "\x03".repeat(count);
-      await ws.writeTerminal({ threadId: row.threadId, data });
+      let delivered = true;
+      try {
+        await ws.writeTerminal({ threadId: row.threadId, data });
+      } catch {
+        // No live session for this thread — nothing to interrupt.
+        delivered = false;
+      }
       return {
         content: [
           {
@@ -522,7 +542,8 @@ function registerTools(server: McpServer): void {
                 ok: true,
                 threadId: row.threadId,
                 interrupts: count,
-                bytesSent: Buffer.byteLength(data, "utf8"),
+                bytesSent: delivered ? Buffer.byteLength(data, "utf8") : 0,
+                ...(delivered ? {} : { note: "no live terminal session; nothing to interrupt" }),
               },
               null,
               2,
@@ -552,22 +573,60 @@ function registerTools(server: McpServer): void {
     },
     async (args: { thread: string; timeoutSeconds?: number; permissionPromptOnly?: boolean }) => {
       const row = resolveThread(args.thread);
-      await ws.openTerminal({
-        threadId: row.threadId,
-        cwd: row.worktreePath ?? row.workspaceRoot,
-      });
       const target: ("attention" | "review")[] = args.permissionPromptOnly
         ? ["attention"]
         : ["attention", "review"];
+      // Peek first: a slept session IS idle — answer immediately instead of
+      // waking the CLI just to watch it sit at a finished turn.
+      const peek = await ws.openTerminal({
+        threadId: row.threadId,
+        cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
+      });
+      if (peek.status === "slept") {
+        const sleptText = await renderTerminal(peek.history);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  threadId: row.threadId,
+                  slept: true,
+                  activity: null,
+                  // A slept session finished its last turn ("review"). It can
+                  // never reach an approval prompt while asleep, so a
+                  // permission-only wait reports timedOut immediately.
+                  agentState: args.permissionPromptOnly ? null : "review",
+                  timedOut: args.permissionPromptOnly === true,
+                  screen: lastMeaningfulLines(sleptText, 80),
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+      if (peek.status !== "running" && peek.status !== "starting") {
+        // Exited or errored shell — restore the legacy behavior of reviving
+        // the session so activity events can flow again.
+        await ws.openTerminal({
+          threadId: row.threadId,
+          cwd: row.worktreePath ?? row.workspaceRoot,
+        });
+      }
       const activity = await ws.waitForAgentState(
         row.threadId,
         target,
         (args.timeoutSeconds ?? 120) * 1000,
       );
-      // Re-fetch a fresh snapshot to return the current screen.
+      // Re-fetch a fresh snapshot to return the current screen (peek only —
+      // the session may have slept while we waited).
       const snap = await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
       });
       const text = await renderTerminal(snap.history);
       return {
@@ -634,11 +693,20 @@ function registerTools(server: McpServer): void {
       headers?: Record<string, string>;
     }) => {
       const row = resolveThread(args.thread);
-      // Ensure the terminal session is alive so activity events start flowing.
-      await ws.openTerminal({
+      // Peek only: a slept session is already idle, and waking it just to
+      // watch for idleness would undo the server's idle-sleep policy.
+      const peek = await ws.openTerminal({
         threadId: row.threadId,
         cwd: row.worktreePath ?? row.workspaceRoot,
+        wake: false,
       });
+      if (peek.status !== "slept" && peek.status !== "running" && peek.status !== "starting") {
+        // Exited or errored shell — revive it so activity events can flow.
+        await ws.openTerminal({
+          threadId: row.threadId,
+          cwd: row.worktreePath ?? row.workspaceRoot,
+        });
+      }
       const target: ("attention" | "review")[] = args.permissionPromptOnly
         ? ["attention"]
         : ["attention", "review"];
@@ -648,26 +716,50 @@ function registerTools(server: McpServer): void {
       void (async () => {
         let payload: Record<string, unknown>;
         try {
-          const activity = await ws.waitForAgentState(row.threadId, target, timeoutSeconds * 1000);
-          const snap = await ws.openTerminal({
-            threadId: row.threadId,
-            cwd: row.worktreePath ?? row.workspaceRoot,
-          });
-          const text = await renderTerminal(snap.history);
-          const screen = lastMeaningfulLines(text, 80);
-          const state = activity?.agentState ?? null;
-          payload = {
-            threadId: row.threadId,
-            threadTitle: row.title,
-            project: row.projectTitle,
-            workspaceRoot: row.workspaceRoot,
-            agentState: state,
-            timedOut: !state || !target.includes(state as "attention" | "review"),
-            screen,
-            activity,
-            scheduledAt,
-            firedAt: new Date().toISOString(),
-          };
+          if (peek.status === "slept") {
+            // Slept = the CLI finished its last turn and was idle long
+            // enough to be put to sleep. Report idleness immediately.
+            const sleptText = await renderTerminal(peek.history);
+            payload = {
+              threadId: row.threadId,
+              threadTitle: row.title,
+              project: row.projectTitle,
+              workspaceRoot: row.workspaceRoot,
+              slept: true,
+              agentState: args.permissionPromptOnly ? null : "review",
+              timedOut: args.permissionPromptOnly === true,
+              screen: lastMeaningfulLines(sleptText, 80),
+              activity: null,
+              scheduledAt,
+              firedAt: new Date().toISOString(),
+            };
+          } else {
+            const activity = await ws.waitForAgentState(
+              row.threadId,
+              target,
+              timeoutSeconds * 1000,
+            );
+            const snap = await ws.openTerminal({
+              threadId: row.threadId,
+              cwd: row.worktreePath ?? row.workspaceRoot,
+              wake: false,
+            });
+            const text = await renderTerminal(snap.history);
+            const screen = lastMeaningfulLines(text, 80);
+            const state = activity?.agentState ?? null;
+            payload = {
+              threadId: row.threadId,
+              threadTitle: row.title,
+              project: row.projectTitle,
+              workspaceRoot: row.workspaceRoot,
+              agentState: state,
+              timedOut: !state || !target.includes(state as "attention" | "review"),
+              screen,
+              activity,
+              scheduledAt,
+              firedAt: new Date().toISOString(),
+            };
+          }
         } catch (err) {
           payload = {
             threadId: row.threadId,

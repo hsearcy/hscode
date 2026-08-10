@@ -24,6 +24,7 @@ export function terminalActivityFromEvent(event: TerminalEvent): TerminalActivit
     case "started":
     case "restarted":
     case "exited":
+    case "slept":
       return {
         hasRunningSubprocess: false,
         agentState: null,

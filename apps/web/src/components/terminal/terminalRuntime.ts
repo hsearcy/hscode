@@ -641,6 +641,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     outputIdentityBuffer: "",
     titleInputBuffer: "",
     hasHandledExit: false,
+    slept: false,
     opened: false,
     disposed: false,
     resizeObserver: null,
@@ -849,6 +850,16 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
 
   entry.terminalDisposables.push(
     terminal.onData((data) => {
+      if (entry.slept) {
+        // The server slept this PTY. Wake it instead of writing — the server
+        // auto-types the CLI resume command on respawn, so forwarding this
+        // keystroke would interleave with the resume command. The keystroke
+        // is intentionally dropped.
+        entry.slept = false;
+        entry.opened = false;
+        openTerminal(entry);
+        return;
+      }
       const nextIdentityState = consumeTerminalIdentityInput(entry.titleInputBuffer, data);
       entry.titleInputBuffer = nextIdentityState.buffer;
       if (nextIdentityState.identity?.cliKind && entry.terminalCliKind === null) {
@@ -898,8 +909,22 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
         return;
       }
 
+      if (event.type === "slept") {
+        flushPendingWrites(entry);
+        entry.slept = true;
+        // Allow the next attach (thread reopen) to call terminal.open again,
+        // which wakes the session server-side.
+        entry.opened = false;
+        writeSystemMessage(
+          terminal,
+          "Terminal is sleeping after idle timeout — press any key to wake",
+        );
+        return;
+      }
+
       if (event.type === "started" || event.type === "restarted") {
         entry.hasHandledExit = false;
+        entry.slept = false;
         entry.titleInputBuffer = "";
         entry.outputIdentityBuffer = "";
         clearPendingWrites(entry);

@@ -258,12 +258,14 @@ export interface TerminalSessionSnapshot {
   threadId: string;
   terminalId: string;
   cwd: string;
-  status: "starting" | "running" | "exited" | "error";
+  status: "starting" | "running" | "exited" | "error" | "slept";
   pid: number | null;
   history: string;
   exitCode: number | null;
   exitSignal: number | null;
   updatedAt: string;
+  /** True when this open() woke a session the idle-sleep policy had stopped. */
+  wokeFromSleep?: boolean;
 }
 
 export type TerminalAgentState = "running" | "attention" | "review" | null;
@@ -466,6 +468,12 @@ export class DpcodeWs {
     terminalId?: string;
     cols?: number;
     rows?: number;
+    /**
+     * false = peek only: never spawn or wake a PTY. Read-only tools
+     * (read_thread, screen renders) must use this so they don't undo the
+     * server's idle-sleep policy.
+     */
+    wake?: boolean;
   }): Promise<TerminalSessionSnapshot> {
     // Pass cols/rows through ONLY when the caller explicitly provides them.
     // The server uses input.cols/rows as the target PTY size and resizes the
@@ -480,6 +488,7 @@ export class DpcodeWs {
       cwd: input.cwd,
       ...(input.cols !== undefined ? { cols: input.cols } : {}),
       ...(input.rows !== undefined ? { rows: input.rows } : {}),
+      ...(input.wake === false ? { wake: false } : {}),
     });
   }
 

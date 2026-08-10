@@ -40,6 +40,10 @@ export const TerminalOpenInput = Schema.Struct({
   cols: Schema.optional(TerminalColsSchema),
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
+  // When false, peek/attach only: never spawn or wake a PTY. A missing or
+  // slept session returns its persisted snapshot instead of respawning, so
+  // read-only consumers (read_thread, screen renders) don't undo idle sleep.
+  wake: Schema.optional(Schema.Boolean),
 });
 export type TerminalOpenInput = Schema.Codec.Encoded<typeof TerminalOpenInput>;
 
@@ -75,7 +79,16 @@ export const TerminalCloseInput = Schema.Struct({
 });
 export type TerminalCloseInput = Schema.Codec.Encoded<typeof TerminalCloseInput>;
 
-export const TerminalSessionStatus = Schema.Literals(["starting", "running", "exited", "error"]);
+// "slept": the PTY was stopped by the idle-sleep policy but the session's
+// history and CLI session id are intact — the next wake-enabled open()
+// respawns the shell and auto-resumes the CLI.
+export const TerminalSessionStatus = Schema.Literals([
+  "starting",
+  "running",
+  "exited",
+  "error",
+  "slept",
+]);
 export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
 
 export const TerminalSessionSnapshot = Schema.Struct({
@@ -88,6 +101,11 @@ export const TerminalSessionSnapshot = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Int),
   exitSignal: Schema.NullOr(Schema.Int),
   updatedAt: Schema.String,
+  // True when this open() respawned the PTY for a session the idle-sleep
+  // policy had stopped. The resume command has been typed into the fresh
+  // shell, but the CLI may still be booting — callers that immediately write
+  // input should wait for the TUI to come up.
+  wokeFromSleep: Schema.optional(Schema.Boolean),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -130,6 +148,15 @@ const TerminalClearedEvent = Schema.Struct({
 const TerminalRestartedEvent = Schema.Struct({
   ...TerminalEventBaseSchema.fields,
   type: Schema.Literal("restarted"),
+  snapshot: TerminalSessionSnapshot,
+});
+
+// Emitted when the idle-sleep policy stops a session's PTY. Distinct from
+// "exited" so clients render a sleep notice instead of a crash banner and
+// know the session will auto-resume on the next wake-enabled open().
+const TerminalSleptEvent = Schema.Struct({
+  ...TerminalEventBaseSchema.fields,
+  type: Schema.Literal("slept"),
   snapshot: TerminalSessionSnapshot,
 });
 
@@ -179,6 +206,7 @@ export const TerminalEvent = Schema.Union([
   TerminalErrorEvent,
   TerminalClearedEvent,
   TerminalRestartedEvent,
+  TerminalSleptEvent,
   TerminalActivityEvent,
   TerminalCliSessionEvent,
 ]);

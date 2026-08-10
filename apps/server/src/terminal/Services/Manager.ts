@@ -88,6 +88,8 @@ export interface TerminalSessionState {
   outputFlushTimer: ReturnType<typeof setTimeout> | null;
   /** Whether PTY reading has been paused due to backpressure. */
   outputPaused: boolean;
+  /** Wall-clock ms when the current PTY process was spawned. Null when no process. */
+  spawnedAt: number | null;
   /** Latest wall-clock timestamp when the user wrote to this PTY. */
   lastInputAt: number | null;
   /** Latest wall-clock timestamp when the PTY emitted output. */

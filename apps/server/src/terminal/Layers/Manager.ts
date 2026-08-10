@@ -82,6 +82,25 @@ const MANAGED_TERMINAL_WRAPPER_DIRNAME = "_managed-bin";
 const MANAGED_TERMINAL_ZSH_DIRNAME = "_managed-zsh";
 // Poll cadence for the managed hook event sink when fs.watch is unavailable.
 const EVENT_SINK_POLL_INTERVAL_MS = 250;
+/**
+ * Idle-sleep policy: a terminal whose managed CLI finished its last turn and
+ * saw no input/output for this long gets its PTY killed. History and the CLI
+ * session id survive, so the next wake-enabled open() respawns the shell and
+ * auto-types `claude --resume` / `codex resume`. Each slept claude/codex CLI
+ * returns 300-600 MB to the machine. Override with
+ * DPCODE_TERMINAL_IDLE_SLEEP_MS; 0 disables sleeping entirely.
+ */
+const DEFAULT_TERMINAL_IDLE_SLEEP_MS = 30 * 60 * 1000;
+const DEFAULT_TERMINAL_IDLE_SLEEP_CHECK_INTERVAL_MS = 60_000;
+
+function idleSleepMsFromEnv(): number {
+  const raw = process.env.DPCODE_TERMINAL_IDLE_SLEEP_MS;
+  if (raw === undefined || raw.trim().length === 0) {
+    return DEFAULT_TERMINAL_IDLE_SLEEP_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_TERMINAL_IDLE_SLEEP_MS;
+}
 
 // Bump PTY children above Chromium renderer's oom_score_adj (300) so the
 // kernel sacrifices runaway CLIs (claude/ruby/etc.) instead of the dpcode UI
@@ -1089,6 +1108,10 @@ interface TerminalManagerOptions {
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
+  /** Idle time before a managed CLI session's PTY is slept. 0 disables. */
+  idleSleepMs?: number;
+  /** Cadence of the idle-sleep eligibility check. */
+  idleSleepCheckIntervalMs?: number;
 }
 
 interface KillEscalationHandle {
@@ -1122,6 +1145,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private readonly maxRetainedInactiveSessions: number;
   private subprocessPollTimer: ReturnType<typeof setInterval> | null = null;
   private subprocessPollInFlight = false;
+  private readonly idleSleepMs: number;
+  private idleSleepTimer: ReturnType<typeof setInterval> | null = null;
+  private idleSleepCheckInFlight = false;
   private readonly killEscalationTimers = new Map<PtyProcess, KillEscalationHandle>();
   private readonly logger = createLogger("terminal");
   private readonly ptyPidTrackerPath: string;
@@ -1147,6 +1173,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
     this.maxRetainedInactiveSessions =
       options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
+    this.idleSleepMs = options.idleSleepMs ?? idleSleepMsFromEnv();
+    if (this.idleSleepMs > 0) {
+      this.idleSleepTimer = setInterval(() => {
+        void this.sleepIdleSessionsIfNeeded();
+      }, options.idleSleepCheckIntervalMs ?? DEFAULT_TERMINAL_IDLE_SLEEP_CHECK_INTERVAL_MS);
+      this.idleSleepTimer.unref?.();
+    }
     fs.mkdirSync(this.logsDir, { recursive: true });
     this.ptyPidTrackerPath = path.join(this.logsDir, PTY_PID_TRACKER_FILENAME);
     const orphanReport = cleanupOrphanPtyPids(this.ptyPidTrackerPath);
@@ -1182,6 +1215,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
       const sessionKey = toSessionKey(input.threadId, input.terminalId);
       const existing = this.sessions.get(sessionKey);
+
+      // Peek mode: read-only consumers must never spawn or wake a PTY, or
+      // every read_thread/screen render would undo the idle-sleep policy.
+      if (input.wake === false) {
+        return this.peekSnapshot(input, existing);
+      }
+
       if (!existing) {
         await this.flushPersistQueue(input.threadId, input.terminalId);
         const history = await this.readHistory(input.threadId, input.terminalId);
@@ -1221,6 +1261,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           pendingOutputLength: 0,
           outputFlushTimer: null,
           outputPaused: false,
+          spawnedAt: null,
           lastInputAt: null,
           lastOutputAt: null,
           lastOutputSignature: null,
@@ -1236,6 +1277,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         return this.snapshot(session);
       }
 
+      const wasSlept = existing.status === "slept";
       const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
       const currentRuntimeEnv = existing.runtimeEnv;
       const targetCols = input.cols ?? existing.cols;
@@ -1265,6 +1307,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           { ...input, cols: targetCols, rows: targetRows },
           "started",
         );
+        if (wasSlept) {
+          // Waking from idle sleep behaves like a fresh spawn: the caller's
+          // auto-launch logic must type the CLI resume command exactly as it
+          // does after a server restart.
+          this.newlySpawnedFlags.add(sessionKey);
+          return { ...this.snapshot(existing), wokeFromSleep: true };
+        }
         return this.snapshot(existing);
       }
 
@@ -1283,7 +1332,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const input = decodeTerminalWriteInput(raw);
     const session = this.requireSession(input.threadId, input.terminalId);
     if (!session.process || session.status !== "running") {
-      if (session.status === "exited") {
+      if (session.status === "exited" || session.status === "slept") {
         return;
       }
       throw new Error(
@@ -1377,6 +1426,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           outputFlushTimer: null,
           outputPaused: false,
           lastOutputSignature: null,
+          spawnedAt: null,
           lastInputAt: null,
           lastOutputAt: null,
           eventSinkPath: null,
@@ -1469,6 +1519,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   }
 
   dispose(): void {
+    if (this.idleSleepTimer) {
+      clearInterval(this.idleSleepTimer);
+      this.idleSleepTimer = null;
+    }
     this.stopSubprocessPolling();
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
@@ -1510,6 +1564,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.managedAgentState = null;
     session.managedAgentObserved = false;
     session.pendingInputBuffer = "";
+    session.spawnedAt = null;
     session.lastInputAt = null;
     session.lastOutputAt = null;
     session.lastOutputSignature = null;
@@ -1610,6 +1665,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         writeTrackedPtyPids(this.ptyPidTrackerPath, this.trackedPtyPids);
       }
       session.status = "running";
+      session.spawnedAt = Date.now();
       session.updatedAt = new Date().toISOString();
       session.unsubscribeData = ptyProcess.onData((data) => {
         this.onProcessData(session, data);
@@ -1636,6 +1692,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       session.status = "error";
       session.pid = null;
       session.process = null;
+      session.spawnedAt = null;
       session.hasRunningSubprocess = false;
       session.detectedCliKind = null;
       session.managedAgentRunning = false;
@@ -1809,6 +1866,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
     session.process = null;
     session.pid = null;
+    session.spawnedAt = null;
     session.hasRunningSubprocess = false;
     session.detectedCliKind = null;
     session.managedAgentRunning = false;
@@ -1843,6 +1901,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.cleanupProcessHandles(session);
     session.process = null;
     session.pid = null;
+    session.spawnedAt = null;
     session.hasRunningSubprocess = false;
     session.detectedCliKind = null;
     session.managedAgentRunning = false;
@@ -2224,6 +2283,109 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     } finally {
       this.subprocessPollInFlight = false;
     }
+  }
+
+  /**
+   * Idle-sleep sweep. A session sleeps only when its managed CLI completed a
+   * turn ("review"), nothing else runs in the PTY, and no input/output has
+   * arrived for idleSleepMs. Sleeping kills the process tree but keeps the
+   * session entry, its scrollback, and (via the projection tables) the CLI
+   * session id — the next wake-enabled open() respawns the shell and the
+   * caller's auto-launch types the CLI resume command.
+   */
+  private async sleepIdleSessionsIfNeeded(): Promise<void> {
+    if (this.idleSleepMs <= 0 || this.idleSleepCheckInFlight) return;
+    this.idleSleepCheckInFlight = true;
+    try {
+      const now = Date.now();
+      const candidates = [...this.sessions.values()].filter((session) =>
+        this.isSleepEligible(session, now),
+      );
+      for (const candidate of candidates) {
+        await this.runWithThreadLock(candidate.threadId, async () => {
+          // Re-check under the thread lock — an open()/write() may have
+          // raced the sweep and made the session active again.
+          const key = toSessionKey(candidate.threadId, candidate.terminalId);
+          const session = this.sessions.get(key);
+          if (!session || session !== candidate || !this.isSleepEligible(session, Date.now())) {
+            return;
+          }
+          await this.sleepSession(session);
+        });
+      }
+    } finally {
+      this.idleSleepCheckInFlight = false;
+    }
+  }
+
+  private isSleepEligible(session: TerminalSessionState, now: number): boolean {
+    if (session.status !== "running" || !session.process) return false;
+    // Only sessions whose managed CLI hooks have fired are sleepable — those
+    // are the sessions the auto-resume path can bring back with `--resume`.
+    // Plain shells and unmanaged CLIs never sleep.
+    if (!session.managedAgentObserved) return false;
+    // "running" is mid-turn; "attention" is an approval prompt that must stay
+    // on screen. Only a completed turn ("review") may sleep.
+    if (session.managedAgentState !== "review") return false;
+    // A non-provider subprocess (build, test run, ...) keeps the PTY awake.
+    if (session.hasRunningSubprocess) return false;
+    const lastActivityAt = Math.max(
+      session.lastInputAt ?? 0,
+      session.lastOutputAt ?? 0,
+      session.spawnedAt ?? 0,
+    );
+    if (lastActivityAt <= 0) return false;
+    return now - lastActivityAt >= this.idleSleepMs;
+  }
+
+  private async sleepSession(session: TerminalSessionState): Promise<void> {
+    this.logger.info("sleeping idle terminal session", {
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+      idleSleepMs: this.idleSleepMs,
+      pid: session.pid,
+    });
+    this.stopProcess(session);
+    session.status = "slept";
+    session.exitCode = null;
+    session.exitSignal = null;
+    session.updatedAt = new Date().toISOString();
+    await this.persistHistory(session.threadId, session.terminalId, session.history);
+    this.emitEvent({
+      type: "slept",
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+      createdAt: new Date().toISOString(),
+      snapshot: this.snapshot(session),
+    });
+  }
+
+  /**
+   * Read-only snapshot for wake=false opens. Attaches to live state when the
+   * session is in memory; otherwise serves the persisted history from disk
+   * without creating a session entry or spawning anything.
+   */
+  private async peekSnapshot(
+    input: { threadId: string; terminalId: string; cwd: string },
+    existing: TerminalSessionState | undefined,
+  ): Promise<TerminalSessionSnapshot> {
+    if (existing) {
+      return this.snapshot(existing);
+    }
+    await this.flushPersistQueue(input.threadId, input.terminalId);
+    const history = await this.readHistory(input.threadId, input.terminalId);
+    const persistedCwd = await this.readPersistedCwd(input.threadId, input.terminalId);
+    return {
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      cwd: persistedCwd ?? input.cwd,
+      status: "slept",
+      pid: null,
+      history,
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   private async assertValidCwd(cwd: string): Promise<void> {

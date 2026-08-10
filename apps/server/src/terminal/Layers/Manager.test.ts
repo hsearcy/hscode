@@ -197,6 +197,8 @@ describe("TerminalManager", () => {
       maxRetainedInactiveSessions?: number;
       ptyAdapter?: FakePtyAdapter;
       historyByteLimit?: number;
+      idleSleepMs?: number;
+      idleSleepCheckIntervalMs?: number;
     } = {},
   ) {
     const logsDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3code-terminal-"));
@@ -216,6 +218,10 @@ describe("TerminalManager", () => {
         ? { maxRetainedInactiveSessions: options.maxRetainedInactiveSessions }
         : {}),
       ...(options.historyByteLimit ? { historyByteLimit: options.historyByteLimit } : {}),
+      ...(options.idleSleepMs !== undefined ? { idleSleepMs: options.idleSleepMs } : {}),
+      ...(options.idleSleepCheckIntervalMs !== undefined
+        ? { idleSleepCheckIntervalMs: options.idleSleepCheckIntervalMs }
+        : {}),
     });
     return { logsDir, ptyAdapter, manager };
   }
@@ -913,6 +919,107 @@ describe("TerminalManager", () => {
 
     expect(spawnInput.shell).toBe("/bin/zsh");
     expect(spawnInput.args).toEqual(["-o", "nopromptsp"]);
+
+    manager.dispose();
+  });
+
+  it("sleeps an idle managed session and wakes it as a fresh spawn with resume semantics", async () => {
+    const { manager, ptyAdapter, logsDir } = makeManager(50, {
+      subprocessChecker: async () => false,
+      subprocessPollIntervalMs: 20,
+      processKillGraceMs: 10,
+      idleSleepMs: 60,
+      idleSleepCheckIntervalMs: 20,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+
+    await manager.open(openInput());
+    const firstProcess = ptyAdapter.processes[0];
+    expect(firstProcess).toBeDefined();
+    if (!firstProcess) return;
+    firstProcess.emitData("turn output\r\n");
+
+    // A completed turn arrives through the managed hook event sink.
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    fs.appendFileSync(sinkPath, "\u001b]633;T3CODE_AGENT_EVENT=Stop\u0007\n");
+
+    await waitFor(() => events.some((event) => event.type === "slept"), 2_000);
+    const sleptEvent = events.find(
+      (event): event is Extract<TerminalEvent, { type: "slept" }> => event.type === "slept",
+    );
+    expect(sleptEvent?.snapshot.status).toBe("slept");
+    expect(firstProcess.killed).toBe(true);
+    // No "exited" crash event — sleeping is not an exit.
+    expect(events.some((event) => event.type === "exited")).toBe(false);
+
+    // Writes to a slept session are dropped silently instead of throwing.
+    await expect(
+      manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" }),
+    ).resolves.toBeUndefined();
+
+    // Waking behaves like a fresh spawn: history survives and the caller's
+    // auto-launch gate (consumeWasNewlySpawned) fires so the CLI resume
+    // command gets typed.
+    const woken = await manager.open(openInput());
+    expect(woken.status).toBe("running");
+    expect(woken.wokeFromSleep).toBe(true);
+    expect(woken.history).toContain("turn output");
+    expect(manager.consumeWasNewlySpawned("thread-1", DEFAULT_TERMINAL_ID)).toBe(true);
+    expect(ptyAdapter.processes).toHaveLength(2);
+
+    manager.dispose();
+  });
+
+  it("never sleeps a session that is mid-turn or waiting on an approval prompt", async () => {
+    const { manager, logsDir, ptyAdapter } = makeManager(50, {
+      subprocessChecker: async () => false,
+      subprocessPollIntervalMs: 20,
+      processKillGraceMs: 10,
+      idleSleepMs: 40,
+      idleSleepCheckIntervalMs: 15,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+
+    await manager.open(openInput());
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    // An approval prompt ("attention") must keep the PTY alive.
+    fs.appendFileSync(sinkPath, "\u001b]633;T3CODE_AGENT_EVENT=PermissionRequest\u0007\n");
+    await waitFor(() =>
+      events.some((event) => event.type === "activity" && event.agentState === "attention"),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(events.some((event) => event.type === "slept")).toBe(false);
+    expect(ptyAdapter.processes[0]?.killed).toBe(false);
+
+    manager.dispose();
+  });
+
+  it("peeks without spawning when wake is false", async () => {
+    const { manager, ptyAdapter, logsDir } = makeManager();
+
+    // No session entry: the peek serves persisted history from disk.
+    fs.writeFileSync(historyLogPath(logsDir), "persisted scrollback\r\n");
+    const peeked = await manager.open({ ...openInput(), wake: false });
+    expect(peeked.status).toBe("slept");
+    expect(peeked.history).toContain("persisted scrollback");
+    expect(ptyAdapter.processes).toHaveLength(0);
+
+    // A live session: the peek attaches without touching the process.
+    const live = await manager.open(openInput());
+    expect(live.status).toBe("running");
+    const peekedLive = await manager.open({ ...openInput(), wake: false });
+    expect(peekedLive.status).toBe("running");
+    expect(peekedLive.pid).toBe(live.pid);
+    expect(ptyAdapter.processes).toHaveLength(1);
 
     manager.dispose();
   });

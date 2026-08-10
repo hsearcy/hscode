@@ -58,6 +58,12 @@ export interface TerminalRuntimeEntry {
   outputIdentityBuffer: string;
   titleInputBuffer: string;
   hasHandledExit: boolean;
+  /**
+   * True after the server slept this session's PTY for being idle. The next
+   * user keystroke (or a fresh attach) re-opens the terminal, which respawns
+   * the shell and auto-resumes the CLI.
+   */
+  slept: boolean;
   opened: boolean;
   disposed: boolean;
   resizeObserver: ResizeObserver | null;
