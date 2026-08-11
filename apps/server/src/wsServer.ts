@@ -1566,7 +1566,18 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   // this, entries for deleted threads (including every Codex subagent thread)
   // survive for the life of the server process.
   yield* Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
+      if (event.type === "thread.archived") {
+        // Archiving must actually end the agent session. Leaving the PTY
+        // alive keeps the CLI process (and e.g. Codex's per-thread session
+        // lock) running invisibly — Codex then refuses `codex resume` after
+        // unarchive because another live session still holds the thread.
+        // History files are kept, so unarchive + reopen resumes normally.
+        yield* terminalManager
+          .close({ threadId: event.payload.threadId })
+          .pipe(Effect.catch(() => Effect.void));
+        return;
+      }
       if (event.type !== "thread.deleted") {
         return;
       }
