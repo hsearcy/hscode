@@ -443,58 +443,71 @@ async function checkWindowsSubprocessActivity(
   }
 }
 
+const shellLikeProcessNames = new Set([
+  "bash",
+  "dash",
+  "fish",
+  "ksh",
+  "login",
+  "nu",
+  "screen",
+  "sh",
+  "tcsh",
+  "tmux",
+  "zellij",
+  "zsh",
+]);
+
+function isShellLikeProcessName(command: string): boolean {
+  const normalized = path.basename(command.trim().split(/\s+/g)[0] ?? "").toLowerCase();
+  return shellLikeProcessNames.has(normalized);
+}
+
+/**
+ * Classify the process tree under a terminal shell. Exported for tests.
+ *
+ * A provider CLI (claude/codex) owns its entire subtree: the MCP servers,
+ * language servers, and helper processes it spawns are part of the provider,
+ * not work the user started in the shell — so recursion stops at the provider
+ * boundary. Recursing into it would flag every agent session as running a
+ * non-provider subprocess forever (each claude child-spawns its configured
+ * MCP servers), which permanently blocked idle sleep.
+ */
+export function classifyTerminalSubprocessTree(
+  parentPid: number,
+  childrenByParentPid: Map<number, Array<{ pid: number; command: string }>>,
+): TerminalSubprocessActivity {
+  const children = childrenByParentPid.get(parentPid) ?? [];
+  let cliKind: TerminalCliKind | null = null;
+  let hasNonProviderSubprocess = false;
+  let hasProviderDescendant = false;
+  let hasRunningSubprocess = false;
+  for (const child of children) {
+    const childCliKind = deriveTerminalProcessIdentity(child.command)?.cliKind ?? null;
+    if (childCliKind) {
+      hasProviderDescendant = true;
+      hasRunningSubprocess = true;
+      cliKind = cliKind ?? childCliKind;
+      continue;
+    }
+    const nestedActivity = classifyTerminalSubprocessTree(child.pid, childrenByParentPid);
+    if (nestedActivity.hasProviderDescendant) {
+      hasProviderDescendant = true;
+    }
+    if (!isShellLikeProcessName(child.command) || nestedActivity.hasNonProviderSubprocess) {
+      hasNonProviderSubprocess = true;
+    }
+    cliKind = cliKind ?? nestedActivity.cliKind;
+    if (!isShellLikeProcessName(child.command) || nestedActivity.hasRunningSubprocess) {
+      hasRunningSubprocess = true;
+    }
+  }
+  return { cliKind, hasNonProviderSubprocess, hasProviderDescendant, hasRunningSubprocess };
+}
+
 async function checkPosixSubprocessActivity(
   terminalPid: number,
 ): Promise<TerminalSubprocessActivity> {
-  const shellLikeProcessNames = new Set([
-    "bash",
-    "dash",
-    "fish",
-    "ksh",
-    "login",
-    "nu",
-    "screen",
-    "sh",
-    "tcsh",
-    "tmux",
-    "zellij",
-    "zsh",
-  ]);
-
-  const isShellLikeProcessName = (command: string): boolean => {
-    const normalized = path.basename(command.trim().split(/\s+/g)[0] ?? "").toLowerCase();
-    return shellLikeProcessNames.has(normalized);
-  };
-
-  const inspectDescendants = (
-    parentPid: number,
-    childrenByParentPid: Map<number, Array<{ pid: number; command: string }>>,
-  ): TerminalSubprocessActivity => {
-    const children = childrenByParentPid.get(parentPid) ?? [];
-    let cliKind: TerminalCliKind | null = null;
-    let hasNonProviderSubprocess = false;
-    let hasProviderDescendant = false;
-    let hasRunningSubprocess = false;
-    for (const child of children) {
-      const nestedActivity = inspectDescendants(child.pid, childrenByParentPid);
-      const childCliKind = deriveTerminalProcessIdentity(child.command)?.cliKind ?? null;
-      if (childCliKind || nestedActivity.hasProviderDescendant) {
-        hasProviderDescendant = true;
-      }
-      if (
-        (!childCliKind && !isShellLikeProcessName(child.command)) ||
-        nestedActivity.hasNonProviderSubprocess
-      ) {
-        hasNonProviderSubprocess = true;
-      }
-      cliKind = cliKind ?? childCliKind ?? nestedActivity.cliKind;
-      if (!isShellLikeProcessName(child.command) || nestedActivity.hasRunningSubprocess) {
-        hasRunningSubprocess = true;
-      }
-    }
-    return { cliKind, hasNonProviderSubprocess, hasProviderDescendant, hasRunningSubprocess };
-  };
-
   try {
     const pgrepResult = await runProcess("pgrep", ["-P", String(terminalPid)], {
       timeoutMs: 1_000,
@@ -553,7 +566,7 @@ async function checkPosixSubprocessActivity(
       childrenByParentPid.set(ppid, siblings);
     }
 
-    return inspectDescendants(terminalPid, childrenByParentPid);
+    return classifyTerminalSubprocessTree(terminalPid, childrenByParentPid);
   } catch {
     return {
       cliKind: null,

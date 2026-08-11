@@ -17,7 +17,7 @@ import {
   type PtyProcess,
   type PtySpawnInput,
 } from "../Services/PTY";
-import { TerminalManagerRuntime } from "./Manager";
+import { classifyTerminalSubprocessTree, TerminalManagerRuntime } from "./Manager";
 import { Effect, Encoding } from "effect";
 
 class FakePtyProcess implements PtyProcess {
@@ -1001,6 +1001,42 @@ describe("TerminalManager", () => {
     expect(ptyAdapter.processes[0]?.killed).toBe(false);
 
     manager.dispose();
+  });
+
+  it("treats the provider CLI's own children as provider-owned, not user work", () => {
+    // Regression: every claude session child-spawns its configured MCP
+    // servers. Counting those as non-provider subprocesses flagged all agent
+    // sessions as busy forever and permanently blocked idle sleep.
+    const tree = new Map<number, Array<{ pid: number; command: string }>>([
+      [100, [{ pid: 101, command: "/home/u/.local/bin/claude --settings /home/u/s.json" }]],
+      [
+        101,
+        [
+          { pid: 102, command: "/home/u/.local/share/slack-mcp/slack-mcp-server" },
+          { pid: 103, command: "node /home/u/.nvm/versions/node/v24/bin/some-mcp" },
+        ],
+      ],
+    ]);
+    const activity = classifyTerminalSubprocessTree(100, tree);
+    expect(activity.hasProviderDescendant).toBe(true);
+    expect(activity.hasNonProviderSubprocess).toBe(false);
+    expect(activity.hasRunningSubprocess).toBe(true);
+    expect(activity.cliKind).toBe("claude");
+  });
+
+  it("still flags user-started subprocesses next to the provider CLI", () => {
+    const tree = new Map<number, Array<{ pid: number; command: string }>>([
+      [
+        100,
+        [
+          { pid: 101, command: "/home/u/.local/bin/claude" },
+          { pid: 104, command: "npm run build" },
+        ],
+      ],
+    ]);
+    const activity = classifyTerminalSubprocessTree(100, tree);
+    expect(activity.hasProviderDescendant).toBe(true);
+    expect(activity.hasNonProviderSubprocess).toBe(true);
   });
 
   it("peeks without spawning when wake is false", async () => {
