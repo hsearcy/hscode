@@ -39,6 +39,7 @@ import {
   applyManagedTerminalAgentWrapperEnv,
   prepareManagedTerminalAgentWrappers,
 } from "../managedTerminalWrappers";
+import { isTerminalInputReportingModeSequence } from "@t3tools/shared/terminalInputModes";
 import {
   ShellCandidate,
   TerminalError,
@@ -655,6 +656,12 @@ function isCsiFinalByte(codePoint: number): boolean {
 
 function shouldStripCsiSequence(body: string, finalByte: string): boolean {
   if (finalByte === "n") {
+    return true;
+  }
+  // Mouse/focus reporting belongs to the live process, not to the scrollback.
+  // Keeping these in history makes a re-attached client report pointer moves
+  // to whatever runs next — usually a shell, which echoes them as garbage.
+  if (isTerminalInputReportingModeSequence(body, finalByte)) {
     return true;
   }
   if (finalByte === "R" && /^[0-9;?]*$/.test(body)) {

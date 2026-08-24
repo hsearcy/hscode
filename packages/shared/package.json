@@ -44,6 +44,10 @@
       "types": "./src/schemaJson.ts",
       "import": "./src/schemaJson.ts"
     },
+    "./terminalInputModes": {
+      "types": "./src/terminalInputModes.ts",
+      "import": "./src/terminalInputModes.ts"
+    },
     "./terminalThreads": {
       "types": "./src/terminalThreads.ts",
       "import": "./src/terminalThreads.ts"

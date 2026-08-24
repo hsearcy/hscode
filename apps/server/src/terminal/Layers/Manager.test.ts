@@ -632,6 +632,29 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("strips mouse and focus reporting mode switches from persisted history", async () => {
+    const { manager, ptyAdapter } = makeManager();
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    process.emitData("prompt ");
+    process.emitData("\u001b[?1002h\u001b[?1006h");
+    process.emitData("\u001b[?1004h");
+    process.emitData("\u001b[?25l");
+    process.emitData("tui\u001b[?1002;1006l");
+    process.emitData("\u001b[?1049h");
+    process.emitData(" done\n");
+
+    await manager.close({ threadId: "thread-1" });
+
+    const reopened = await manager.open(openInput());
+    expect(reopened.history).toBe("prompt \u001b[?25ltui\u001b[?1049h done\n");
+
+    manager.dispose();
+  });
+
   it("preserves clear and style control sequences while dropping chunk-split query traffic", async () => {
     const { manager, ptyAdapter } = makeManager();
     await manager.open(openInput());

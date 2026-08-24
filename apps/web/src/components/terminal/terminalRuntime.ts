@@ -15,6 +15,7 @@ import {
   consumeTerminalIdentityInput,
   deriveTerminalOutputIdentity,
 } from "@t3tools/shared/terminalThreads";
+import { TERMINAL_INPUT_REPORTING_RESET_SEQUENCE } from "@t3tools/shared/terminalInputModes";
 import { Terminal } from "@xterm/xterm";
 
 import { readNativeApi } from "~/nativeApi";
@@ -929,11 +930,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
         entry.outputIdentityBuffer = "";
         clearPendingWrites(entry);
         clearDeferredWrites(entry);
-        terminal.write("\u001bc");
-        if (event.snapshot.history.length > 0) {
-          maybePromoteTerminalIdentityFromOutput(entry, event.snapshot.history);
-          terminal.write(event.snapshot.history);
-        }
+        replaySnapshotHistory(entry, event.snapshot.history);
         return;
       }
 
@@ -997,6 +994,24 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
   return entry;
 }
 
+/**
+ * Replay a session snapshot into the emulator.
+ *
+ * Resets first so the replay starts from a clean state, then silences mouse
+ * and focus reporting afterwards: recorded output may have enabled those
+ * modes for a process that has since exited, and a terminal left reporting
+ * to a plain shell floods it with `^[[<35;…M` pointer noise on every mouse
+ * move. A live TUI re-enables what it needs on its next repaint.
+ */
+function replaySnapshotHistory(entry: TerminalRuntimeEntry, history: string): void {
+  entry.terminal.write("\u001bc");
+  if (history.length > 0) {
+    maybePromoteTerminalIdentityFromOutput(entry, history);
+    entry.terminal.write(history);
+  }
+  entry.terminal.write(TERMINAL_INPUT_REPORTING_RESET_SEQUENCE);
+}
+
 function openTerminal(entry: TerminalRuntimeEntry): void {
   const api = readNativeApi();
   if (!api || entry.opened) return;
@@ -1016,11 +1031,7 @@ function openTerminal(entry: TerminalRuntimeEntry): void {
     })
     .then((snapshot) => {
       if (entry.disposed) return;
-      entry.terminal.write("\u001bc");
-      if (snapshot.history.length > 0) {
-        maybePromoteTerminalIdentityFromOutput(entry, snapshot.history);
-        entry.terminal.write(snapshot.history);
-      }
+      replaySnapshotHistory(entry, snapshot.history);
       if (entry.viewState.autoFocus) {
         window.requestAnimationFrame(() => {
           entry.terminal.focus();
