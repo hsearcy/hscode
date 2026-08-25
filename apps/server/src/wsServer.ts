@@ -2548,6 +2548,13 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             terminalId,
             data: `${initialCommand}\r`,
           });
+          // A resuming CLI repaints its entire transcript. Hold that burst
+          // until the PTY goes quiet so the client shows the restored screen
+          // in one repaint instead of animating the whole thread.
+          yield* terminalManager.holdOutputUntilQuiet({
+            threadId: body.threadId,
+            terminalId,
+          });
           if (!launched) {
             yield* projectionThreadRepository.markCliLaunchedOnce({
               threadId: ThreadId.makeUnsafe(body.threadId),

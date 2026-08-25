@@ -42,6 +42,7 @@ import {
 import { isTerminalInputReportingModeSequence } from "@t3tools/shared/terminalInputModes";
 import {
   ShellCandidate,
+  TerminalOutputHoldInput,
   TerminalError,
   TerminalManager,
   TerminalManagerShape,
@@ -74,6 +75,14 @@ const OUTPUT_BATCH_INTERVAL_MS = 16;
 const OUTPUT_BATCH_SIZE_LIMIT = 131_072; // 128 KB
 /** Pause PTY reads when the pending output buffer exceeds this size. */
 const OUTPUT_BUFFER_HIGH_WATERMARK = 1_048_576; // 1 MB
+/**
+ * Quiet period that releases an output hold. Long enough to bridge the gaps
+ * inside a CLI's resume repaint, short enough that a prompt the CLI asks
+ * during startup still reaches the user promptly.
+ */
+const DEFAULT_OUTPUT_HOLD_SETTLE_MS = 400;
+/** Upper bound on an output hold, so a chatty session is never frozen. */
+const DEFAULT_OUTPUT_HOLD_MAX_MS = 15_000;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const PROVIDER_INPUT_ACTIVITY_GRACE_MS = 8_000;
@@ -1280,6 +1289,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           pendingOutputChunks: [],
           pendingOutputLength: 0,
           outputFlushTimer: null,
+          outputHoldSettleMs: null,
+          outputHoldDeadline: null,
+          outputHoldTimer: null,
           outputPaused: false,
           spawnedAt: null,
           lastInputAt: null,
@@ -1371,6 +1383,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       this.emitActivityEvent(session);
     }
     session.lastInputAt = Date.now();
+    // The user is interacting: show whatever a resume repaint has queued up
+    // before their keystroke echoes.
+    if (session.outputHoldSettleMs !== null) {
+      this.endOutputHold(session);
+    }
     session.process.write(input.data);
   }
 
@@ -1444,6 +1461,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           pendingOutputChunks: [],
           pendingOutputLength: 0,
           outputFlushTimer: null,
+          outputHoldSettleMs: null,
+          outputHoldDeadline: null,
+          outputHoldTimer: null,
           outputPaused: false,
           lastOutputSignature: null,
           spawnedAt: null,
@@ -1840,6 +1860,11 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       session.outputPaused = true;
     }
 
+    if (session.outputHoldSettleMs !== null) {
+      this.scheduleOutputHoldRelease(session);
+      return;
+    }
+
     if (session.pendingOutputLength >= OUTPUT_BATCH_SIZE_LIMIT) {
       // Large burst — flush immediately to avoid excessive latency.
       this.flushOutputBuffer(session);
@@ -1848,6 +1873,64 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         this.flushOutputBuffer(session);
       }, OUTPUT_BATCH_INTERVAL_MS);
     }
+  }
+
+  /**
+   * Start (or restart) an output hold. See `holdOutputUntilQuiet` on the
+   * service interface for why a resuming CLI needs one.
+   */
+  private beginOutputHold(session: TerminalSessionState, settleMs: number, maxMs: number): void {
+    session.outputHoldSettleMs = settleMs;
+    session.outputHoldDeadline = Date.now() + maxMs;
+    if (session.outputFlushTimer !== null) {
+      clearTimeout(session.outputFlushTimer);
+      session.outputFlushTimer = null;
+    }
+    this.scheduleOutputHoldRelease(session);
+  }
+
+  private scheduleOutputHoldRelease(session: TerminalSessionState): void {
+    const settleMs = session.outputHoldSettleMs;
+    if (settleMs === null) return;
+    if (session.outputHoldTimer !== null) {
+      clearTimeout(session.outputHoldTimer);
+      session.outputHoldTimer = null;
+    }
+    const deadline = session.outputHoldDeadline ?? 0;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      this.endOutputHold(session);
+      return;
+    }
+    const timer = setTimeout(
+      () => {
+        this.endOutputHold(session);
+      },
+      Math.min(settleMs, remaining),
+    );
+    timer.unref?.();
+    session.outputHoldTimer = timer;
+  }
+
+  /** Release a hold and stream the collected output as one batch. */
+  private endOutputHold(session: TerminalSessionState): void {
+    if (session.outputHoldTimer !== null) {
+      clearTimeout(session.outputHoldTimer);
+      session.outputHoldTimer = null;
+    }
+    session.outputHoldSettleMs = null;
+    session.outputHoldDeadline = null;
+    this.flushOutputBuffer(session);
+  }
+
+  holdOutputUntilQuiet(input: TerminalOutputHoldInput): void {
+    const session = this.sessions.get(toSessionKey(input.threadId, input.terminalId));
+    if (!session || !session.process) return;
+    this.beginOutputHold(
+      session,
+      input.settleMs ?? DEFAULT_OUTPUT_HOLD_SETTLE_MS,
+      input.maxMs ?? DEFAULT_OUTPUT_HOLD_MAX_MS,
+    );
   }
 
   private flushOutputBuffer(session: TerminalSessionState): void {
@@ -1878,7 +1961,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
   private onProcessExit(session: TerminalSessionState, event: PtyExitEvent): void {
     // Drain any remaining batched output before emitting the exit event.
-    this.flushOutputBuffer(session);
+    this.endOutputHold(session);
     this.clearKillEscalationTimer(session.process);
     this.cleanupProcessHandles(session);
     if (typeof session.pid === "number" && this.trackedPtyPids.delete(session.pid)) {
@@ -1915,7 +1998,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
   private stopProcess(session: TerminalSessionState): void {
     // Drain any remaining batched output before killing.
-    this.flushOutputBuffer(session);
+    this.endOutputHold(session);
     const process = session.process;
     if (!process) return;
     this.cleanupProcessHandles(session);
@@ -2745,6 +2828,7 @@ export const TerminalManagerLive = Layer.effect(
         Effect.sync(() => runtime.getSessionActivity(threadId, terminalId)),
       consumeWasNewlySpawned: (threadId, terminalId) =>
         Effect.sync(() => runtime.consumeWasNewlySpawned(threadId, terminalId)),
+      holdOutputUntilQuiet: (input) => Effect.sync(() => runtime.holdOutputUntilQuiet(input)),
       subscribe: (listener) =>
         Effect.sync(() => {
           runtime.on("event", listener);

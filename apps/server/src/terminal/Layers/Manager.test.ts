@@ -632,6 +632,68 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("holds output during a resume repaint and releases it as one batch", async () => {
+    const { manager, ptyAdapter } = makeManager();
+    const outputs: string[] = [];
+    manager.on("event", (event) => {
+      if (event.type === "output") outputs.push(event.data);
+    });
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    manager.holdOutputUntilQuiet({
+      threadId: "thread-1",
+      terminalId: "default",
+      settleMs: 60,
+      maxMs: 5_000,
+    });
+    process.emitData("frame-1");
+    process.emitData("frame-2");
+    process.emitData("frame-3");
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(outputs).toEqual([]);
+
+    await waitFor(() => outputs.length > 0);
+    expect(outputs).toEqual(["frame-1frame-2frame-3"]);
+
+    // The hold is over: later output streams normally again.
+    process.emitData("live");
+    await waitFor(() => outputs.length > 1);
+    expect(outputs[1]).toBe("live");
+
+    manager.dispose();
+  });
+
+  it("releases a held resume repaint as soon as the user types", async () => {
+    const { manager, ptyAdapter } = makeManager();
+    const outputs: string[] = [];
+    manager.on("event", (event) => {
+      if (event.type === "output") outputs.push(event.data);
+    });
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    manager.holdOutputUntilQuiet({
+      threadId: "thread-1",
+      terminalId: "default",
+      settleMs: 5_000,
+      maxMs: 30_000,
+    });
+    process.emitData("frame-1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(outputs).toEqual([]);
+
+    await manager.write({ threadId: "thread-1", data: "x" });
+    expect(outputs).toEqual(["frame-1"]);
+
+    manager.dispose();
+  });
+
   it("strips mouse and focus reporting mode switches from persisted history", async () => {
     const { manager, ptyAdapter } = makeManager();
     await manager.open(openInput());

@@ -1032,6 +1032,11 @@ function openTerminal(entry: TerminalRuntimeEntry): void {
     .then((snapshot) => {
       if (entry.disposed) return;
       replaySnapshotHistory(entry, snapshot.history);
+      if (snapshot.wokeFromSleep) {
+        // The server auto-types the CLI resume command and holds the repaint
+        // burst until the PTY goes quiet. Say so, or the pane looks frozen.
+        writeSystemMessage(entry.terminal, "Resuming session…");
+      }
       if (entry.viewState.autoFocus) {
         window.requestAnimationFrame(() => {
           entry.terminal.focus();

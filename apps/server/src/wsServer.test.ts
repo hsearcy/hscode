@@ -225,6 +225,13 @@ class MockTerminalManager implements TerminalManagerShape {
   readonly consumeWasNewlySpawned: TerminalManagerShape["consumeWasNewlySpawned"] = () =>
     Effect.sync(() => true);
 
+  readonly outputHolds: { threadId: string; terminalId: string }[] = [];
+
+  readonly holdOutputUntilQuiet: TerminalManagerShape["holdOutputUntilQuiet"] = (input) =>
+    Effect.sync(() => {
+      this.outputHolds.push({ threadId: input.threadId, terminalId: input.terminalId });
+    });
+
   readonly subscribe: TerminalManagerShape["subscribe"] = (listener) =>
     Effect.sync(() => {
       this.listeners.add(listener);
@@ -2719,6 +2726,11 @@ describe("WebSocket Server", () => {
     expect(terminalManager.writeInputs.map((input) => input.data)).toEqual([
       "codex\r",
       "codex resume 019f4c9e-f110-7d32-b2b7-f6c0b77def2c\r",
+    ]);
+    // Each auto-typed launch holds the CLI's repaint burst until it settles.
+    expect(terminalManager.outputHolds).toEqual([
+      { threadId: "thread-codex-resume", terminalId: DEFAULT_TERMINAL_ID },
+      { threadId: "thread-codex-resume", terminalId: DEFAULT_TERMINAL_ID },
     ]);
 
     await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {

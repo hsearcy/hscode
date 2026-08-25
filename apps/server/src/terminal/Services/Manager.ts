@@ -88,6 +88,15 @@ export interface TerminalSessionState {
   outputFlushTimer: ReturnType<typeof setTimeout> | null;
   /** Whether PTY reading has been paused due to backpressure. */
   outputPaused: boolean;
+  /**
+   * Quiet period, in ms, that must pass before held output is released, or
+   * null when output streams normally. See `holdOutputUntilQuiet`.
+   */
+  outputHoldSettleMs: number | null;
+  /** Wall-clock ms after which a hold is released even if output continues. */
+  outputHoldDeadline: number | null;
+  /** Timer handle for the pending quiet-period release. */
+  outputHoldTimer: ReturnType<typeof setTimeout> | null;
   /** Wall-clock ms when the current PTY process was spawned. Null when no process. */
   spawnedAt: number | null;
   /** Latest wall-clock timestamp when the user wrote to this PTY. */
@@ -108,6 +117,15 @@ export interface TerminalSessionState {
   eventSinkOffset: number;
   /** Buffered partial line carried between event sink reads. */
   eventSinkBuffer: string;
+}
+
+export interface TerminalOutputHoldInput {
+  threadId: string;
+  terminalId: string;
+  /** Quiet period that releases the hold. Defaults to the manager's value. */
+  settleMs?: number;
+  /** Upper bound on the hold. Defaults to the manager's value. */
+  maxMs?: number;
 }
 
 export interface ShellCandidate {
@@ -183,6 +201,20 @@ export interface TerminalManagerShape {
    * auto-launch logic to avoid injecting `claude --resume` into a live TUI.
    */
   readonly consumeWasNewlySpawned: (threadId: string, terminalId: string) => Effect.Effect<boolean>;
+
+  /**
+   * Buffer streamed output for this session until the PTY goes quiet.
+   *
+   * A resuming CLI repaints its whole transcript — tens of thousands of
+   * frames for a long thread. Streaming that live makes the attached client
+   * animate the entire scrollback for several seconds. Holding it and
+   * releasing one batch shows the restored screen in a single repaint.
+   *
+   * The hold ends at the first quiet period, at the deadline, or on the next
+   * user write, whichever comes first. History and hook signals are
+   * unaffected — only the output event stream is delayed.
+   */
+  readonly holdOutputUntilQuiet: (input: TerminalOutputHoldInput) => Effect.Effect<void>;
 
   /**
    * Subscribe to terminal runtime events.
