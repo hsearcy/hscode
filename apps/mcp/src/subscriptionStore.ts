@@ -12,7 +12,8 @@
 // ever receive the file path and fs/parse error text — never header or URL
 // contents.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type ScreenScope = "off" | "tail" | "lastTurn";
@@ -26,6 +27,12 @@ export interface PersistedSubscription {
   screenScope: ScreenScope;
   minIntervalMs: number;
 }
+
+export interface RuntimeSubscription extends PersistedSubscription {
+  lastFiredAt: Map<string, number>;
+}
+
+export type SubscriptionConfig = Omit<PersistedSubscription, "id">;
 
 /** Reports a non-fatal storage problem. Must never be passed secret material. */
 export type Reporter = (message: string) => void;
@@ -119,14 +126,73 @@ export function saveSubscriptions(
   subs: PersistedSubscription[],
   report: Reporter = defaultReport,
 ): void {
+  let temporaryPath: string | null = null;
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, serializeSubscriptions(subs));
+    temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(temporaryPath, serializeSubscriptions(subs), { mode: 0o600 });
+    renameSync(temporaryPath, path);
+    temporaryPath = null;
   } catch (err) {
     report(
       `[hscode-mcp] failed to persist subscriptions to ${path}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
+  } finally {
+    if (temporaryPath) {
+      try {
+        unlinkSync(temporaryPath);
+      } catch {
+        // The failed write or another cleanup path can remove it first.
+      }
+    }
   }
+}
+
+/** Make one process's runtime view match the shared durable subscription file. */
+export function reconcileSubscriptions(
+  active: Map<string, RuntimeSubscription>,
+  durable: PersistedSubscription[],
+): void {
+  const durableIds = new Set(durable.map((subscription) => subscription.id));
+  for (const id of active.keys()) {
+    if (!durableIds.has(id)) active.delete(id);
+  }
+
+  for (const subscription of durable) {
+    const lastFiredAt = active.get(subscription.id)?.lastFiredAt ?? new Map<string, number>();
+    active.set(subscription.id, { ...subscription, lastFiredAt });
+  }
+}
+
+function sameStringRecord(left: Record<string, string>, right: Record<string, string>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key])
+  );
+}
+
+function sameStates(left: SubscriptionState[], right: SubscriptionState[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((state) => rightSet.has(state));
+}
+
+/** Find an existing durable registration with the same delivery behavior. */
+export function findEquivalentSubscription(
+  subscriptions: PersistedSubscription[],
+  requested: SubscriptionConfig,
+): PersistedSubscription | null {
+  return (
+    subscriptions.find(
+      (subscription) =>
+        subscription.url === requested.url &&
+        subscription.screenScope === requested.screenScope &&
+        subscription.minIntervalMs === requested.minIntervalMs &&
+        sameStates(subscription.states, requested.states) &&
+        sameStringRecord(subscription.headers, requested.headers),
+    ) ?? null
+  );
 }

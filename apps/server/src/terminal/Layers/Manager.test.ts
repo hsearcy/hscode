@@ -667,6 +667,37 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("does not pause the PTY for back-pressure while output is held", async () => {
+    const { manager, ptyAdapter } = makeManager();
+    const outputs: string[] = [];
+    manager.on("event", (event) => {
+      if (event.type === "output") outputs.push(event.data);
+    });
+    await manager.open(openInput());
+    const process = ptyAdapter.processes[0];
+    expect(process).toBeDefined();
+    if (!process) return;
+
+    manager.holdOutputUntilQuiet({
+      threadId: "thread-1",
+      terminalId: "default",
+      settleMs: 60,
+      maxMs: 5_000,
+    });
+    // Well past the normal 1 MB back-pressure watermark, well under the hold's
+    // own ceiling: a transcript repaint must arrive as one uninterrupted batch.
+    const frame = "x".repeat(600_000);
+    process.emitData(frame);
+    process.emitData(frame);
+    process.emitData(frame);
+    expect(process.paused).toBe(false);
+
+    await waitFor(() => outputs.length > 0);
+    expect(outputs).toEqual([frame.repeat(3)]);
+
+    manager.dispose();
+  });
+
   it("releases a held resume repaint as soon as the user types", async () => {
     const { manager, ptyAdapter } = makeManager();
     const outputs: string[] = [];

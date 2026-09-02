@@ -83,6 +83,12 @@ const OUTPUT_BUFFER_HIGH_WATERMARK = 1_048_576; // 1 MB
 const DEFAULT_OUTPUT_HOLD_SETTLE_MS = 400;
 /** Upper bound on an output hold, so a chatty session is never frozen. */
 const DEFAULT_OUTPUT_HOLD_MAX_MS = 15_000;
+/**
+ * Ceiling on buffered output while a hold is active. Larger than the normal
+ * back-pressure watermark because a full transcript repaint is the expected
+ * payload; past this the hold gives up and streams again.
+ */
+const OUTPUT_HOLD_BUFFER_LIMIT = 8_388_608; // 8 MB
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const PROVIDER_INPUT_ACTIVITY_GRACE_MS = 8_000;
@@ -1854,15 +1860,23 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.pendingOutputChunks.push(data);
     session.pendingOutputLength += data.length;
 
+    if (session.outputHoldSettleMs !== null) {
+      // Held output must not trip back-pressure: pausing the PTY would stall
+      // the repaint, let the quiet period expire, and split the burst into
+      // partial screens — exactly the flicker the hold exists to avoid. The
+      // hold ends instead once the buffer reaches its own ceiling.
+      if (session.pendingOutputLength >= OUTPUT_HOLD_BUFFER_LIMIT) {
+        this.endOutputHold(session);
+        return;
+      }
+      this.scheduleOutputHoldRelease(session);
+      return;
+    }
+
     // Backpressure: pause PTY when the pending buffer grows too large.
     if (!session.outputPaused && session.pendingOutputLength >= OUTPUT_BUFFER_HIGH_WATERMARK) {
       session.process?.pause();
       session.outputPaused = true;
-    }
-
-    if (session.outputHoldSettleMs !== null) {
-      this.scheduleOutputHoldRelease(session);
-      return;
     }
 
     if (session.pendingOutputLength >= OUTPUT_BATCH_SIZE_LIMIT) {

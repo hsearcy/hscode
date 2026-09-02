@@ -329,6 +329,7 @@ import {
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
   TERMINAL_CLI_THREAD_OPTIONS,
+  type NewTerminalCliThreadKind,
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   readFileAsDataUrl,
@@ -5860,7 +5861,7 @@ export default function ChatView({
   ]);
 
   const handleCreateCliThread = useCallback(
-    async (cliKind: TerminalCliKind) => {
+    async (cliKind: NewTerminalCliThreadKind) => {
       const api = readNativeApi();
       if (!api || !activeProject) {
         return;

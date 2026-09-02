@@ -68,7 +68,16 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
   readonly targetPath: string;
   readonly legacyPaths: readonly string[];
 }): DesktopUserDataProfileSeedResult {
-  if (FS.existsSync(input.targetPath)) {
+  // Seed per entry, not per profile directory. Chromium recreates a store it
+  // cannot read ("Creating DB ... since it was missing" after an unclean
+  // shutdown), which leaves the profile directory in place with one entry
+  // gone. An all-or-nothing check on the directory reported "target-exists"
+  // forever and silently stranded the legacy copy — losing renderer settings
+  // (2026-08-26).
+  const missingEntryNames = PROFILE_SEED_ENTRY_NAMES.filter(
+    (entryName) => !FS.existsSync(Path.join(input.targetPath, entryName)),
+  );
+  if (missingEntryNames.length === 0) {
     return {
       status: "target-exists",
       sourcePath: null,
@@ -78,7 +87,8 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
 
   const sourcePath =
     input.legacyPaths.find(
-      (candidate) => FS.existsSync(candidate) && hasSeedableProfileData(candidate),
+      (candidate) =>
+        FS.existsSync(candidate) && hasSeedableProfileData(candidate, missingEntryNames),
     ) ?? null;
   if (!sourcePath) {
     return {
@@ -90,7 +100,7 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
 
   try {
     FS.mkdirSync(input.targetPath, { recursive: true });
-    for (const entryName of PROFILE_SEED_ENTRY_NAMES) {
+    for (const entryName of missingEntryNames) {
       const sourceEntryPath = Path.join(sourcePath, entryName);
       if (!FS.existsSync(sourceEntryPath)) {
         continue;
@@ -107,7 +117,7 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
         {
           sourcePath,
           seededAt: new Date().toISOString(),
-          entries: PROFILE_SEED_ENTRY_NAMES,
+          entries: missingEntryNames,
         },
         null,
         2,
@@ -128,8 +138,9 @@ export function seedDesktopUserDataProfileFromLegacy(input: {
   }
 }
 
-function hasSeedableProfileData(profilePath: string): boolean {
-  return PROFILE_SEED_ENTRY_NAMES.some((entryName) =>
-    FS.existsSync(Path.join(profilePath, entryName)),
-  );
+function hasSeedableProfileData(
+  profilePath: string,
+  entryNames: readonly string[] = PROFILE_SEED_ENTRY_NAMES,
+): boolean {
+  return entryNames.some((entryName) => FS.existsSync(Path.join(profilePath, entryName)));
 }

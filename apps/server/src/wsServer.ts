@@ -2491,6 +2491,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           body.threadId,
           terminalId,
         );
+        let resumeCommandSent = false;
         yield* Effect.gen(function* () {
           if (!wasNewlySpawned) return;
           const readModel = yield* orchestrationEngine.getReadModel();
@@ -2548,6 +2549,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             terminalId,
             data: `${initialCommand}\r`,
           });
+          resumeCommandSent = true;
           // A resuming CLI repaints its entire transcript. Hold that burst
           // until the PTY goes quiet so the client shows the restored screen
           // in one repaint instead of animating the whole thread.
@@ -2561,7 +2563,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             });
           }
         }).pipe(Effect.catch(() => Effect.void));
-        return snapshot;
+        return resumeCommandSent ? { ...snapshot, resumeCommandSent: true } : snapshot;
       }
 
       case WS_METHODS.terminalWrite: {

@@ -106,6 +106,10 @@ export const TerminalSessionSnapshot = Schema.Struct({
   // shell, but the CLI may still be booting — callers that immediately write
   // input should wait for the TUI to come up.
   wokeFromSleep: Schema.optional(Schema.Boolean),
+  // True when this open() auto-typed the CLI resume command. The CLI answers
+  // by repainting its whole transcript, so clients should expect a burst of
+  // output that supersedes the history in this snapshot.
+  resumeCommandSent: Schema.optional(Schema.Boolean),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 

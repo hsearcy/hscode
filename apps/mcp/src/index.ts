@@ -41,12 +41,20 @@ import {
   scrubCredentials,
 } from "./projects.ts";
 import {
+  findEquivalentSubscription,
   loadSubscriptions as loadSubscriptionsFromDisk,
   type PersistedSubscription,
+  reconcileSubscriptions,
+  type RuntimeSubscription,
   saveSubscriptions,
   type ScreenScope,
 } from "./subscriptionStore.ts";
+import { sendTerminalInput } from "./terminalInput.ts";
 import { createThreadEventGate } from "./threadEventGate.ts";
+import {
+  claimWebhookDelivery,
+  pruneWebhookDeliveryClaims,
+} from "./webhookDeliveryClaims.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.5",
@@ -164,17 +172,7 @@ const ws = new DpcodeWs(cfg);
 // read_thread/notify_on_idle), so newly created threads won't appear until
 // someone opens them.
 
-interface ThreadEventSubscription {
-  id: string;
-  url: string;
-  headers: Record<string, string>;
-  states: Array<"running" | "attention" | "review">; // empty = all transitions
-  screenScope: ScreenScope;
-  minIntervalMs: number;
-  lastFiredAt: Map<string, number>; // threadId → ms timestamp of last POST
-}
-
-const subscriptions = new Map<string, ThreadEventSubscription>();
+const subscriptions = new Map<string, RuntimeSubscription>();
 let pushHandlerInstalled = false;
 
 // Subscriptions outlive the MCP process: persist them to disk so a
@@ -182,6 +180,8 @@ let pushHandlerInstalled = false;
 // to re-subscribe. Only the durable fields are stored — throttle state
 // (lastFiredAt) and timers are transient and reset on load.
 const SUBSCRIPTIONS_PATH = join(cfg.homeDir, "userdata", "mcp-subscriptions.json");
+const WEBHOOK_CLAIMS_PATH = join(cfg.homeDir, "userdata", "mcp-webhook-delivery-claims");
+const WEBHOOK_CLAIM_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function persistSubscriptions(): void {
   const rows: PersistedSubscription[] = Array.from(subscriptions.values()).map((s) => ({
@@ -196,9 +196,7 @@ function persistSubscriptions(): void {
 }
 
 function loadSubscriptions(): number {
-  for (const row of loadSubscriptionsFromDisk(SUBSCRIPTIONS_PATH)) {
-    subscriptions.set(row.id, { ...row, lastFiredAt: new Map() });
-  }
+  reconcileSubscriptions(subscriptions, loadSubscriptionsFromDisk(SUBSCRIPTIONS_PATH));
   return subscriptions.size;
 }
 
@@ -207,6 +205,9 @@ function loadSubscriptions(): number {
 // still working) are held until the state sticks — see threadEventGate.ts.
 const threadEventGate = createThreadEventGate({
   forward: (input) => {
+    // The file is the source of truth across stdio MCP processes. Refresh it
+    // here so an old process cannot keep a removed subscription in memory.
+    loadSubscriptions();
     if (subscriptions.size === 0) return;
     void fanOutThreadEvent(input);
   },
@@ -222,6 +223,7 @@ function ensureGlobalPushHandler(): void {
   ws.enableAutoReconnect();
   ws.onPush((channel, data) => {
     if (channel !== "terminal.event" || !data || typeof data !== "object") return;
+    loadSubscriptions();
     threadEventGate.handleActivity(data as Record<string, unknown>);
   });
 }
@@ -253,6 +255,9 @@ async function fanOutThreadEvent(input: {
     }
   }
   const firedAt = new Date().toISOString();
+  // Rendering can take time. Refresh again immediately before delivery so an
+  // unsubscribe from another MCP process takes effect without a restart.
+  loadSubscriptions();
   await Promise.all(
     Array.from(subscriptions.values()).map(async (sub) => {
       if (
@@ -284,6 +289,11 @@ async function fanOutThreadEvent(input: {
             : lastMeaningfulLines(renderedText, 80);
         payload.screenScope = sub.screenScope;
       }
+      // Stdio MCP hosts start one process per client. All of those processes
+      // can receive this same terminal event and restore this same durable
+      // subscription. An atomic claim file makes exactly one of them the
+      // sender for this subscription event.
+      if (!claimWebhookDelivery(WEBHOOK_CLAIMS_PATH, sub.id, input.ev)) return;
       try {
         await fetch(sub.url, {
           method: "POST",
@@ -337,6 +347,32 @@ function resolveThread(input: string): ThreadRow {
     );
   }
   return rows[0]!;
+}
+
+// Keep the reset key events separate so that the terminal and TUI process them
+// in order. This is long enough for a local PTY without delaying every prompt.
+const TERMINAL_INPUT_KEY_SETTLE_MS = 100;
+
+async function writeThreadInput(row: ThreadRow, text: string, submit: boolean): Promise<number> {
+  const openSnap = await ws.openTerminal({
+    threadId: row.threadId,
+    cwd: row.worktreePath ?? row.workspaceRoot,
+  });
+  if (openSnap.wokeFromSleep) {
+    // The open() respawned a slept PTY and the server typed the CLI resume
+    // command. Wait until the TUI can accept input instead of writing into the
+    // shell or a half-drawn composer.
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+
+  return sendTerminalInput(
+    {
+      write: (data) => ws.writeTerminal({ threadId: row.threadId, data }),
+      settle: () => new Promise((resolve) => setTimeout(resolve, TERMINAL_INPUT_KEY_SETTLE_MS)),
+    },
+    text,
+    submit,
+  );
 }
 
 function makeServer(): McpServer {
@@ -444,37 +480,27 @@ function registerTools(server: McpServer): void {
     "send_input",
     {
       description:
-        "Send text to an HS Code thread's terminal. By default appends a carriage return so it submits as a line of input (e.g. a chat message, or a numeric menu choice). Set `submit: false` to send raw bytes without trailing CR — useful for typing partial input or appending escape sequences. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
+        "Send text to an HS Code thread's terminal. By default, this writes the complete text, clears Codex paste-burst state with a temporary non-ASCII marker that it immediately deletes, and sends Enter separately. The submitted prompt does not contain the marker. Multiline text and a trailing line feed are preserved as prompt content. Set `submit: false` to type partial input without Enter. If a draft remains in the composer, use `submit_input`. WARNING: Before sending a normal chat message, call `read_thread` to confirm the CLI isn't sitting on an interactive prompt that would consume your text as a menu choice.",
       inputSchema: {
         thread: z.string().describe("Thread id (UUID) or unique title fragment."),
-        text: z.string().min(1).describe("Bytes to send. Use \\r for Enter, \\x1b for ESC."),
+        text: z
+          .string()
+          .min(1)
+          .describe(
+            "Prompt text to type. Pass real multiline text, not escape notation such as the literal characters \\r.",
+          ),
         submit: z
           .boolean()
           .optional()
-          .describe("If true (default), append a carriage return so the CLI sees a complete line."),
+          .describe(
+            "If true (default), clear paste-burst state and send Enter separately after the prompt text.",
+          ),
       },
     },
     async (args: { thread: string; text: string; submit?: boolean }) => {
       const row = resolveThread(args.thread);
-      // Ensure the terminal session is alive (server will resume the CLI if needed).
-      const openSnap = await ws.openTerminal({
-        threadId: row.threadId,
-        cwd: row.worktreePath ?? row.workspaceRoot,
-      });
-      if (openSnap.wokeFromSleep) {
-        // The open() respawned a slept PTY and the server typed the CLI
-        // resume command, but the CLI needs a few seconds to boot. Writing
-        // immediately would land the text in the shell or a half-drawn TUI.
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-      }
       const submit = args.submit ?? true;
-      // Treat trailing \n or \r as "already terminated" so we don't append a
-      // second submit byte. Claude Code's TUI parses `\n` as a soft newline
-      // in the composer; chasing it with `\r` can submit the existing draft
-      // before the new text is registered.
-      const endsWithSubmit = args.text.endsWith("\r") || args.text.endsWith("\n");
-      const data = submit && !endsWithSubmit ? `${args.text}\r` : args.text;
-      await ws.writeTerminal({ threadId: row.threadId, data });
+      const bytesSent = await writeThreadInput(row, args.text, submit);
       return {
         content: [
           {
@@ -483,8 +509,44 @@ function registerTools(server: McpServer): void {
               {
                 ok: true,
                 threadId: row.threadId,
-                bytesSent: Buffer.byteLength(data, "utf8"),
-                submitted: submit,
+                bytesSent,
+                submitRequested: submit,
+                pasteStateReset: submit,
+                enterSentSeparately: submit,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server.registerTool as any)(
+    "submit_input",
+    {
+      description:
+        "Clear Codex paste-burst state, then send Enter to an HS Code thread. Use this as a fallback only after `read_thread` confirms that text from an earlier `send_input` call is still in the Codex or Claude composer. The tool types a temporary non-ASCII marker and deletes it before submission, so the draft text is unchanged.",
+      inputSchema: {
+        thread: z.string().describe("Thread id (UUID) or unique title fragment."),
+      },
+    },
+    async (args: { thread: string }) => {
+      const row = resolveThread(args.thread);
+      const bytesSent = await writeThreadInput(row, "", true);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                ok: true,
+                threadId: row.threadId,
+                bytesSent,
+                pasteStateReset: true,
+                enterSent: true,
               },
               null,
               2,
@@ -866,7 +928,7 @@ function registerTools(server: McpServer): void {
       // Make sure the WS is connected so we receive terminal.event pushes.
       await ws.connect();
       ensureGlobalPushHandler();
-      const id = randomUUID();
+      loadSubscriptions();
       // Resolve the screen scope from the new field, falling back to the
       // legacy boolean. Default: "off" (no screen) — explicit opt-in only.
       let screenScope: ScreenScope;
@@ -877,13 +939,41 @@ function registerTools(server: McpServer): void {
       } else {
         screenScope = "off";
       }
-      const sub: ThreadEventSubscription = {
-        id,
+      const requested = {
         url: args.notifyUrl,
         headers: args.headers ?? {},
         states: args.states ?? ["review", "attention"],
         screenScope,
         minIntervalMs: args.minIntervalMs ?? 2000,
+      } satisfies Omit<PersistedSubscription, "id">;
+      const existing = findEquivalentSubscription(Array.from(subscriptions.values()), requested);
+      if (existing) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  ok: true,
+                  created: false,
+                  subscriptionId: existing.id,
+                  notifyUrl: existing.url,
+                  states: existing.states,
+                  screenScope: existing.screenScope,
+                  minIntervalMs: existing.minIntervalMs,
+                  activeSubscriptions: subscriptions.size,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+      const id = randomUUID();
+      const sub: RuntimeSubscription = {
+        id,
+        ...requested,
         lastFiredAt: new Map(),
       };
       subscriptions.set(id, sub);
@@ -895,6 +985,7 @@ function registerTools(server: McpServer): void {
             text: JSON.stringify(
               {
                 ok: true,
+                created: true,
                 subscriptionId: id,
                 notifyUrl: sub.url,
                 states: sub.states,
@@ -925,6 +1016,7 @@ function registerTools(server: McpServer): void {
       },
     },
     async (args: { subscriptionId?: string }) => {
+      loadSubscriptions();
       let removed: number;
       if (args.subscriptionId) {
         removed = subscriptions.delete(args.subscriptionId) ? 1 : 0;
@@ -956,6 +1048,7 @@ function registerTools(server: McpServer): void {
       inputSchema: {},
     },
     async () => {
+      loadSubscriptions();
       const list = Array.from(subscriptions.values()).map((s) => ({
         subscriptionId: s.id,
         notifyUrl: s.url,
@@ -1384,6 +1477,8 @@ async function main() {
       `[hscode-mcp] failed to connect to ${cfg.wsUrl}: ${(err as Error).message}\n`,
     );
   }
+
+  pruneWebhookDeliveryClaims(WEBHOOK_CLAIMS_PATH, WEBHOOK_CLAIM_RETENTION_MS);
 
   // Restore webhook subscriptions persisted by a prior process so a
   // stop/start doesn't force remote clients to re-subscribe.

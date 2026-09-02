@@ -55,6 +55,15 @@ const ENABLE_TERMINAL_WEBGL = true;
 const VISUAL_RESIZE_MIN_INTERVAL_MS = 64;
 const WRITE_BATCH_SIZE_LIMIT = 262_144;
 const WRITE_BATCH_MAX_LATENCY_MS = 50;
+/** Lines of scrollback kept per terminal. */
+const TERMINAL_SCROLLBACK_LINES = 5_000;
+/**
+ * Quiet period after a wake before the resumed CLI's transcript repaint is
+ * dropped from scrollback.
+ */
+const RESUME_TRIM_SETTLE_MS = 800;
+/** Upper bound on the wake window, so a busy session is never trimmed late. */
+const RESUME_TRIM_MAX_MS = 20_000;
 
 // Once WebGL fails, skip it for subsequent terminals in this renderer process.
 // Canvas is the next-best fallback; only drop to DOM if both fail (which keeps
@@ -601,7 +610,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     fontSize: 12,
     fontWeight: 700,
     fontWeightBold: 700,
-    scrollback: 5_000,
+    scrollback: TERMINAL_SCROLLBACK_LINES,
     fontFamily: getTerminalFontFamily(),
     theme: terminalThemeFromApp(),
     allowProposedApi: true,
@@ -643,6 +652,8 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     titleInputBuffer: "",
     hasHandledExit: false,
     slept: false,
+    resumeTrimTimer: null,
+    resumeTrimDeadline: 0,
     opened: false,
     disposed: false,
     resizeObserver: null,
@@ -861,6 +872,9 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
         openTerminal(entry);
         return;
       }
+      // Typing means the user is working in the restored session: leave their
+      // own output alone.
+      clearResumeTrim(entry);
       const nextIdentityState = consumeTerminalIdentityInput(entry.titleInputBuffer, data);
       entry.titleInputBuffer = nextIdentityState.buffer;
       if (nextIdentityState.identity?.cliKind && entry.terminalCliKind === null) {
@@ -901,6 +915,7 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
     (event) => {
       if (event.type === "output") {
         maybePromoteTerminalIdentityFromOutput(entry, event.data);
+        scheduleResumeTrim(entry);
         if (entry.viewState.isVisible) {
           flushDeferredWrites(entry);
           scheduleWrite(entry, event.data);
@@ -994,6 +1009,62 @@ export function createRuntimeEntry(config: TerminalRuntimeConfig): TerminalRunti
   return entry;
 }
 
+function clearResumeTrim(entry: TerminalRuntimeEntry): void {
+  if (entry.resumeTrimTimer !== null) {
+    window.clearTimeout(entry.resumeTrimTimer);
+    entry.resumeTrimTimer = null;
+  }
+  entry.resumeTrimDeadline = 0;
+}
+
+/**
+ * Drop everything above the visible screen.
+ *
+ * xterm trims the buffer whenever the scrollback limit shrinks, so a round
+ * trip through 0 discards scrollback and leaves the viewport untouched.
+ */
+function trimScrollback(entry: TerminalRuntimeEntry): void {
+  const scrollback = entry.terminal.options.scrollback ?? TERMINAL_SCROLLBACK_LINES;
+  entry.terminal.options.scrollback = 0;
+  entry.terminal.options.scrollback = scrollback;
+}
+
+/**
+ * Open a wake window.
+ *
+ * Resuming a CLI repaints its whole transcript into scrollback — thousands of
+ * lines nobody asked to re-read. Once the repaint settles, throw that
+ * scrollback away and keep only the restored screen. The window closes on the
+ * first quiet period, at the deadline, or on user input.
+ */
+function beginResumeTrim(entry: TerminalRuntimeEntry): void {
+  clearResumeTrim(entry);
+  entry.resumeTrimDeadline = Date.now() + RESUME_TRIM_MAX_MS;
+  scheduleResumeTrim(entry);
+}
+
+function scheduleResumeTrim(entry: TerminalRuntimeEntry): void {
+  if (entry.resumeTrimDeadline === 0) return;
+  if (entry.resumeTrimTimer !== null) {
+    window.clearTimeout(entry.resumeTrimTimer);
+    entry.resumeTrimTimer = null;
+  }
+  const remaining = entry.resumeTrimDeadline - Date.now();
+  if (remaining <= 0) {
+    clearResumeTrim(entry);
+    return;
+  }
+  entry.resumeTrimTimer = window.setTimeout(
+    () => {
+      entry.resumeTrimTimer = null;
+      clearResumeTrim(entry);
+      flushPendingWrites(entry);
+      trimScrollback(entry);
+    },
+    Math.min(RESUME_TRIM_SETTLE_MS, remaining),
+  );
+}
+
 /**
  * Replay a session snapshot into the emulator.
  *
@@ -1031,11 +1102,16 @@ function openTerminal(entry: TerminalRuntimeEntry): void {
     })
     .then((snapshot) => {
       if (entry.disposed) return;
-      replaySnapshotHistory(entry, snapshot.history);
-      if (snapshot.wokeFromSleep) {
-        // The server auto-types the CLI resume command and holds the repaint
-        // burst until the PTY goes quiet. Say so, or the pane looks frozen.
+      if (snapshot.resumeCommandSent) {
+        // The server auto-typed the CLI resume command and holds the repaint
+        // burst until the PTY goes quiet. Replaying the recorded snapshot
+        // here would only be overdrawn by that repaint, so start clean and
+        // say what is happening — the pane is otherwise blank for a moment.
+        replaySnapshotHistory(entry, "");
         writeSystemMessage(entry.terminal, "Resuming session…");
+        beginResumeTrim(entry);
+      } else {
+        replaySnapshotHistory(entry, snapshot.history);
       }
       if (entry.viewState.autoFocus) {
         window.requestAnimationFrame(() => {
@@ -1115,6 +1191,7 @@ export function detachRuntimeFromContainer(entry: TerminalRuntimeEntry): void {
 
 export function disposeRuntimeEntry(entry: TerminalRuntimeEntry): void {
   detachRuntimeFromContainer(entry);
+  clearResumeTrim(entry);
   entry.disposed = true;
   flushPendingWrites(entry);
   clearDeferredWrites(entry);

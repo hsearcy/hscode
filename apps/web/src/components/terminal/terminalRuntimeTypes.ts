@@ -64,6 +64,13 @@ export interface TerminalRuntimeEntry {
    * the shell and auto-resumes the CLI.
    */
   slept: boolean;
+  /**
+   * Timer that drops the resumed CLI's transcript repaint out of scrollback
+   * once the wake burst settles, or null when no wake is in progress.
+   */
+  resumeTrimTimer: number | null;
+  /** Wall-clock ms after which the wake window closes untrimmed. */
+  resumeTrimDeadline: number;
   opened: boolean;
   disposed: boolean;
   resizeObserver: ResizeObserver | null;

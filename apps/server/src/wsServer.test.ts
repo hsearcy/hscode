@@ -2721,7 +2721,7 @@ describe("WebSocket Server", () => {
       threadId: "thread-codex-resume",
       deleteHistory: true,
     });
-    await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
+    const resumedResponse = await sendRequest(ws, WS_METHODS.terminalOpen, openInput);
 
     expect(terminalManager.writeInputs.map((input) => input.data)).toEqual([
       "codex\r",
@@ -2732,6 +2732,11 @@ describe("WebSocket Server", () => {
       { threadId: "thread-codex-resume", terminalId: DEFAULT_TERMINAL_ID },
       { threadId: "thread-codex-resume", terminalId: DEFAULT_TERMINAL_ID },
     ]);
+    // The snapshot tells the client the recorded history is about to be
+    // superseded by the CLI's own repaint.
+    expect((resumedResponse.result as { resumeCommandSent?: boolean }).resumeCommandSent).toBe(
+      true,
+    );
 
     await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
       type: "thread.create",

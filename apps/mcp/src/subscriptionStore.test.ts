@@ -1,12 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  findEquivalentSubscription,
   loadSubscriptions,
   normalizeSubscriptionRow,
   type PersistedSubscription,
   parseSubscriptions,
+  reconcileSubscriptions,
   saveSubscriptions,
   serializeSubscriptions,
 } from "./subscriptionStore.ts";
@@ -138,5 +140,51 @@ describe("loadSubscriptions / saveSubscriptions", () => {
     expect(Object.keys(onDisk[0]).sort()).toEqual(
       ["headers", "id", "minIntervalMs", "screenScope", "states", "url"].sort(),
     );
+  });
+
+  it("stores subscription secrets in a private file", () => {
+    saveSubscriptions(path, [sampleSub()]);
+
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("reconcileSubscriptions", () => {
+  it("removes stale process state and preserves throttle state for durable subscriptions", () => {
+    const keep = sampleSub({ id: "keep", minIntervalMs: 3000 });
+    const stale = sampleSub({ id: "stale" });
+    const lastFiredAt = new Map([["thread-1", 1234]]);
+    const active = new Map([
+      [keep.id, { ...keep, lastFiredAt }],
+      [stale.id, { ...stale, lastFiredAt: new Map<string, number>() }],
+    ]);
+    const added = sampleSub({ id: "added" });
+
+    reconcileSubscriptions(active, [{ ...keep, minIntervalMs: 9000 }, added]);
+
+    expect([...active.keys()]).toEqual(["keep", "added"]);
+    expect(active.get("keep")?.minIntervalMs).toBe(9000);
+    expect(active.get("keep")?.lastFiredAt).toBe(lastFiredAt);
+    expect(active.get("added")?.lastFiredAt).toEqual(new Map());
+  });
+});
+
+describe("findEquivalentSubscription", () => {
+  it("finds the existing ID when registration fields are equivalent", () => {
+    const existing = sampleSub({ states: ["attention", "review"] });
+    const requested = {
+      ...sampleSub({ id: "ignored", states: ["review", "attention"] }),
+      id: undefined,
+    };
+    const { id: _id, ...config } = requested;
+
+    expect(findEquivalentSubscription([existing], config)?.id).toBe(existing.id);
+  });
+
+  it("does not merge subscriptions with different delivery settings", () => {
+    const existing = sampleSub();
+    const { id: _id, ...config } = sampleSub({ minIntervalMs: 9000 });
+
+    expect(findEquivalentSubscription([existing], config)).toBeNull();
   });
 });

@@ -58,11 +58,69 @@ describe("desktopUserDataProfile", () => {
         FS.readFileSync(Path.join(targetPath, "Local Storage", "leveldb", "000003.log"), "utf8"),
       ).toBe("t3code:pinned-threads:v1");
 
+      // Nothing left for the legacy profile to give: it holds no other store.
       const secondResult = seedDesktopUserDataProfileFromLegacy({
         targetPath,
         legacyPaths: [legacyPath],
       });
-      expect(secondResult.status).toBe("target-exists");
+      expect(secondResult.status).toBe("legacy-missing");
+      expect(
+        FS.readFileSync(Path.join(targetPath, "Local Storage", "leveldb", "000003.log"), "utf8"),
+      ).toBe("t3code:pinned-threads:v1");
+    } finally {
+      FS.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-seeds a single store Chromium recreated, leaving the rest untouched", () => {
+    const tempDir = FS.mkdtempSync(Path.join(OS.tmpdir(), "hscode-userdata-profile-"));
+    try {
+      const legacyPath = Path.join(tempDir, "dpcode");
+      const targetPath = Path.join(tempDir, "hscode");
+      FS.mkdirSync(Path.join(legacyPath, "Local Storage", "leveldb"), { recursive: true });
+      FS.writeFileSync(
+        Path.join(legacyPath, "Local Storage", "leveldb", "000003.log"),
+        "dpcode:theme",
+      );
+      FS.mkdirSync(Path.join(legacyPath, "Session Storage"), { recursive: true });
+      FS.writeFileSync(Path.join(legacyPath, "Session Storage", "stale.log"), "legacy");
+
+      // The profile survives, but its Local Storage was wiped and rebuilt.
+      FS.mkdirSync(Path.join(targetPath, "Session Storage"), { recursive: true });
+      FS.writeFileSync(Path.join(targetPath, "Session Storage", "current.log"), "current");
+      FS.writeFileSync(Path.join(targetPath, "Preferences"), "{}");
+
+      const result = seedDesktopUserDataProfileFromLegacy({
+        targetPath,
+        legacyPaths: [legacyPath],
+      });
+
+      expect(result.status).toBe("seeded");
+      expect(
+        FS.readFileSync(Path.join(targetPath, "Local Storage", "leveldb", "000003.log"), "utf8"),
+      ).toBe("dpcode:theme");
+      // Stores the profile still had are left exactly as they were.
+      expect(FS.existsSync(Path.join(targetPath, "Session Storage", "stale.log"))).toBe(false);
+      expect(FS.readFileSync(Path.join(targetPath, "Preferences"), "utf8")).toBe("{}");
+    } finally {
+      FS.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports target-exists when every store is present", () => {
+    const tempDir = FS.mkdtempSync(Path.join(OS.tmpdir(), "hscode-userdata-profile-"));
+    try {
+      const legacyPath = Path.join(tempDir, "dpcode");
+      const targetPath = Path.join(tempDir, "hscode");
+      FS.mkdirSync(Path.join(legacyPath, "Local Storage"), { recursive: true });
+      for (const entryName of ["Local Storage", "IndexedDB", "Session Storage"]) {
+        FS.mkdirSync(Path.join(targetPath, entryName), { recursive: true });
+      }
+      FS.writeFileSync(Path.join(targetPath, "Preferences"), "{}");
+
+      expect(
+        seedDesktopUserDataProfileFromLegacy({ targetPath, legacyPaths: [legacyPath] }).status,
+      ).toBe("target-exists");
     } finally {
       FS.rmSync(tempDir, { recursive: true, force: true });
     }
