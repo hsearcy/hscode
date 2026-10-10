@@ -133,7 +133,7 @@ export class LastResponseReader {
       // Keep the last known response if tool output has pushed it out of the tail.
       if (!response && cached && info.ino === cached.inode && info.size > cached.size)
         response = cached.response
-          ? { ...cached.response, activity: activity ?? cached.response.activity }
+          ? { ...cached.response, activity: activity ?? cached.response.activity ?? null }
           : null;
       if (this.cache.size >= 200) this.cache.delete(this.cache.keys().next().value!);
       this.cache.set(key, { version, inode: info.ino, size: info.size, response });

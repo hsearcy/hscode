@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CommandThread } from "@t3tools/contracts";
+import { ProjectId, type CommandThread } from "@t3tools/contracts";
 import { commandColumn, filterCommandThreads } from "./CommandView.logic";
 
 const thread = (id: string, overrides: Partial<CommandThread> = {}) =>
@@ -35,7 +35,7 @@ describe("Command board", () => {
   it("combines project and case-insensitive response search", () => {
     const threads = [
       thread("1"),
-      thread("2", { projectId: "other" }),
+      thread("2", { projectId: ProjectId.makeUnsafe("other") }),
       thread("3", { response: "Nothing" }),
     ];
     expect(

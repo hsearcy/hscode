@@ -1526,7 +1526,10 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         ? yield* Effect.promise(
             async () =>
               (input.sessionId ? await codexSessionMetadata.resolve(input.sessionId) : null) ??
-              (await codexSessionMetadata.resolve(initialThread.cliSessionId, initialThread.title)),
+              (await codexSessionMetadata.resolve(
+                initialThread.cliSessionId ?? null,
+                initialThread.title,
+              )),
           )
         : null;
     // File reads can overlap a manual title change. Use the current projection
@@ -2553,7 +2556,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             return;
           }
           const cliKind = thread.cliKind;
-          let cliSessionId = thread.cliSessionId;
+          let cliSessionId: string | null = thread.cliSessionId ?? null;
           if (!cliKind) {
             return;
           }

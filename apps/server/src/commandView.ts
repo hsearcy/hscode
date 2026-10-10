@@ -141,7 +141,11 @@ export class CommandViewReader {
         .filter((project) => !project.deletedAt)
         .map((project) => [project.id, project]),
     );
-    const candidates = [];
+    const candidates: Array<{
+      thread: OrchestrationReadModel["threads"][number];
+      terminal: TerminalSessionActivity | null;
+      at: ReturnType<typeof commandThreadActivityAt>;
+    }> = [];
     for (const thread of model.threads) {
       if (
         thread.archivedAt ||

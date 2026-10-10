@@ -182,7 +182,7 @@ export function CommandView() {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     let pending: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = ensureNativeApi().terminal.onEvent((event) => {
-      if (event.type === "data" || pending) return;
+      if (event.type === "output" || pending) return;
       pending = setTimeout(() => {
         pending = undefined;
         void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
