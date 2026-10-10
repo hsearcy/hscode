@@ -194,9 +194,11 @@ import {
   ChevronRightIcon,
   EllipsisIcon,
   QueueArrow,
+  TerminalIcon,
   Trash2,
   XIcon,
 } from "~/lib/icons";
+import { resolveSiblingThreadContextOptions } from "../lib/threadBootstrap";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { Skeleton } from "./ui/skeleton";
@@ -686,6 +688,7 @@ interface ChatViewProps {
   onToggleBrowserPanel?: () => void;
   onOpenTurnDiffPanel?: (turnId: TurnId, filePath?: string) => void;
   onSplitSurface?: () => void;
+  onSplitTerminal?: () => void;
   onMaximizeSurface?: () => void;
   onChangeThreadInSplitPane?: () => void;
 }
@@ -701,6 +704,7 @@ export default function ChatView({
   onToggleBrowserPanel,
   onOpenTurnDiffPanel,
   onSplitSurface,
+  onSplitTerminal,
   onMaximizeSurface,
   onChangeThreadInSplitPane,
 }: ChatViewProps) {
@@ -5912,6 +5916,18 @@ export default function ChatView({
     ],
   );
 
+  // Swaps the empty landing draft for a plain terminal thread in the same folder.
+  const handleCreatePlainTerminalThread = useCallback(() => {
+    if (!activeProject) {
+      return;
+    }
+    void handleNewThread(activeProject.id, {
+      ...resolveSiblingThreadContextOptions({ thread: serverThread, draftThread }),
+      entryPoint: "terminal",
+      fresh: true,
+    });
+  }, [activeProject, draftThread, handleNewThread, serverThread]);
+
   const onProviderModelSelect = useCallback(
     (provider: ProviderKind, model: ModelSlug) => {
       if (!activeThread) return;
@@ -7453,6 +7469,7 @@ export default function ChatView({
           onUpdateProjectScript={updateProjectScript}
           onDeleteProjectScript={deleteProjectScript}
           onToggleTerminal={toggleTerminalVisibility}
+          onSplitTerminal={onSplitTerminal ?? null}
           onToggleDiff={onToggleDiff}
           onToggleBrowser={onToggleBrowser}
           onCreateHandoff={onCreateHandoffThread}
@@ -7523,6 +7540,14 @@ export default function ChatView({
                     </h2>
                   </div>
                   <div className="mx-auto mb-3 flex w-full max-w-3xl items-center justify-center gap-2 px-3">
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+                      onClick={handleCreatePlainTerminalThread}
+                    >
+                      <TerminalIcon className="size-3.5 shrink-0" />
+                      Terminal
+                    </button>
                     {TERMINAL_CLI_THREAD_OPTIONS.map(({ cliKind, label }) => (
                       <button
                         key={cliKind}

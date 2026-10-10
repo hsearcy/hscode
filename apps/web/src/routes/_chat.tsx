@@ -20,7 +20,7 @@ import {
   resolveCurrentProjectTargetId,
   resolveLatestProjectTargetId,
 } from "../lib/projectShortcutTargets";
-import { resolveThreadEnvironmentMode } from "../lib/threadEnvironment";
+import { resolveSiblingThreadContextOptions } from "../lib/threadBootstrap";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { resolveShortcutCommand } from "../keybindings";
@@ -208,14 +208,10 @@ function ChatRouteGlobalShortcuts() {
         event.preventDefault();
         event.stopPropagation();
         void handleNewThread(projectId, {
-          branch: activeThread?.branch ?? activeDraftThread?.branch ?? null,
-          worktreePath: activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null,
-          envMode:
-            activeDraftThread?.envMode ??
-            resolveThreadEnvironmentMode({
-              envMode: activeThread?.envMode,
-              worktreePath: activeThread?.worktreePath ?? null,
-            }),
+          ...resolveSiblingThreadContextOptions({
+            thread: activeThread,
+            draftThread: activeDraftThread,
+          }),
           entryPoint: "terminal",
         });
         return;
@@ -257,14 +253,10 @@ function ChatRouteGlobalShortcuts() {
         event.stopPropagation();
         void handleNewThread(projectId, {
           provider,
-          branch: activeThread?.branch ?? activeDraftThread?.branch ?? null,
-          worktreePath: activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null,
-          envMode:
-            activeDraftThread?.envMode ??
-            resolveThreadEnvironmentMode({
-              envMode: activeThread?.envMode,
-              worktreePath: activeThread?.worktreePath ?? null,
-            }),
+          ...resolveSiblingThreadContextOptions({
+            thread: activeThread,
+            draftThread: activeDraftThread,
+          }),
         });
         return;
       }
@@ -274,14 +266,10 @@ function ChatRouteGlobalShortcuts() {
       event.preventDefault();
       event.stopPropagation();
       void handleNewThread(currentProjectId, {
-        branch: activeThread?.branch ?? activeDraftThread?.branch ?? null,
-        worktreePath: activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null,
-        envMode:
-          activeDraftThread?.envMode ??
-          resolveThreadEnvironmentMode({
-            envMode: activeThread?.envMode,
-            worktreePath: activeThread?.worktreePath ?? null,
-          }),
+        ...resolveSiblingThreadContextOptions({
+          thread: activeThread,
+          draftThread: activeDraftThread,
+        }),
       });
     };
 

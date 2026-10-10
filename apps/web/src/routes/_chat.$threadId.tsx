@@ -29,6 +29,7 @@ import { Schema } from "effect";
 import ChatView from "../components/ChatView";
 import BrowserPanel from "../components/BrowserPanel";
 import { ClaudeAI, Gemini, OpenAI, OpenCodeIcon } from "../components/Icons";
+import { TerminalIcon } from "~/lib/icons";
 import { ChatPaneDropOverlay } from "../components/chat-drop-overlay/ChatPaneDropOverlay";
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
 import {
@@ -45,6 +46,7 @@ import {
   stripDiffSearchParams,
 } from "../diffRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useCreateSiblingTerminalThread } from "../hooks/useCreateSiblingTerminalThread";
 import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { resolveActiveSplitView, isSplitRoute } from "../splitViewRoute";
 import { canSubdividePane, collectLeaves, findLeafPaneById } from "../splitView.logic";
@@ -585,6 +587,7 @@ function SplitPaneEmptyState(props: {
   projects: readonly { id: ProjectId; name: string }[];
   excludedThreadIds: ReadonlySet<ThreadIdType>;
   onSelectThread: (threadId: ThreadIdType) => void;
+  onNewTerminal: () => void;
 }) {
   return (
     <div
@@ -595,7 +598,15 @@ function SplitPaneEmptyState(props: {
       onMouseDown={props.onFocus}
     >
       <div className="w-full max-w-sm space-y-4">
-        <p className="text-center text-sm font-medium text-foreground/70">Select a chat</p>
+        <button
+          type="button"
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-[color:var(--color-border-light)] px-3 py-2 text-sm font-medium text-foreground/80 transition-colors hover:bg-[var(--sidebar-accent)] hover:text-foreground"
+          onClick={props.onNewTerminal}
+        >
+          <TerminalIcon className="size-4 shrink-0" />
+          New terminal
+        </button>
+        <p className="text-center text-sm font-medium text-foreground/70">Or select a chat</p>
         <div className="max-h-[60vh] space-y-1 overflow-y-auto">
           {props.threads.map((thread) => {
             const isUsed = props.excludedThreadIds.has(thread.id);
@@ -871,6 +882,7 @@ function DeferredChatView(props: {
   onToggleBrowser: () => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onSplitSurface?: () => void;
+  onSplitTerminal?: () => void;
   onMaximize?: () => void;
   onChangeThread?: () => void;
   onMounted?: () => void;
@@ -921,6 +933,7 @@ function DeferredChatView(props: {
       onToggleBrowserPanel={props.onToggleBrowser}
       onOpenTurnDiffPanel={props.onOpenTurnDiff}
       {...(props.onSplitSurface ? { onSplitSurface: props.onSplitSurface } : {})}
+      {...(props.onSplitTerminal ? { onSplitTerminal: props.onSplitTerminal } : {})}
       {...(props.onMaximize ? { onMaximizeSurface: props.onMaximize } : {})}
       {...(props.onChangeThread ? { onChangeThreadInSplitPane: props.onChangeThread } : {})}
     />
@@ -955,6 +968,9 @@ function SplitPaneSurface(props: {
   onMaximize: () => void;
   onChooseThread: () => void;
   onSelectThread: (threadId: ThreadIdType) => void;
+  onNewTerminal: () => void;
+  // Absent when the pane cannot be subdivided further; the header then falls back to the drawer.
+  onSplitTerminal: (() => void) | null;
   onChatMounted: () => void;
   onDropThread: (payload: {
     droppedThreadId: ThreadIdType;
@@ -1012,6 +1028,7 @@ function SplitPaneSurface(props: {
               onOpenTurnDiff={props.onOpenTurnDiff}
               onMaximize={props.onMaximize}
               onChangeThread={props.onChooseThread}
+              {...(props.onSplitTerminal ? { onSplitTerminal: props.onSplitTerminal } : {})}
               onMounted={props.onChatMounted}
             />
           ) : (
@@ -1022,6 +1039,7 @@ function SplitPaneSurface(props: {
               projects={props.projects}
               excludedThreadIds={props.excludedThreadIds}
               onSelectThread={props.onSelectThread}
+              onNewTerminal={props.onNewTerminal}
             />
           )}
         </SidebarInset>
@@ -1056,6 +1074,7 @@ function SplitPaneSurface(props: {
 function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: ThreadIdType }) {
   const navigate = useNavigate();
   const { handleNewChat } = useHandleNewChat();
+  const createSiblingTerminalThread = useCreateSiblingTerminalThread();
   const selectAllThreads = useMemo(() => createAllThreadsSelector(), []);
   const threads = useStore(selectAllThreads);
   const projects = useStore((store) => store.projects);
@@ -1383,6 +1402,40 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
     });
   };
 
+  // An empty pane's terminal inherits the folder of the chat it sits beside.
+  const openNewTerminalInPane = async (paneId: PaneId) => {
+    const terminalThreadId = await createSiblingTerminalThread({
+      sourceThreadId: resolveSplitViewFocusedThreadId(activeSplitView),
+      fallbackProjectId: activeSplitView.ownerProjectId,
+    });
+    if (terminalThreadId) {
+      chooseThreadForPane(terminalThreadId, paneId);
+    }
+  };
+
+  // Splits the pane and puts a new terminal thread beside it (right, or below when too narrow).
+  const resolveTerminalSplitDirection = (paneId: PaneId): SplitDirection | null => {
+    if (canSubdividePane(activeSplitView.root, paneId, "horizontal")) return "horizontal";
+    if (canSubdividePane(activeSplitView.root, paneId, "vertical")) return "vertical";
+    return null;
+  };
+  const splitTerminalFromPane = async (
+    paneId: PaneId,
+    sourceThreadId: ThreadIdType,
+    direction: SplitDirection,
+  ) => {
+    const terminalThreadId = await createSiblingTerminalThread({
+      sourceThreadId,
+      fallbackProjectId: activeSplitView.ownerProjectId,
+    });
+    if (!terminalThreadId) return;
+    handleDropThreadOnPane(paneId, {
+      droppedThreadId: terminalThreadId,
+      direction,
+      side: "second",
+    });
+  };
+
   // Window controls live in the chat header. In split mode every pane has a
   // header, so we only render them in the topmost-rightmost leaf to avoid
   // duplicating the controls across panes.
@@ -1397,6 +1450,8 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   const renderLeaf = ({ leaf }: { leaf: LeafPane }): ReactNode => {
     const isFocused = leaf.id === activeSplitView.focusedPaneId;
     const excluded = new Set<ThreadIdType>(splitThreadIds);
+    const leafThreadId = leaf.threadId;
+    const terminalSplitDirection = resolveTerminalSplitDirection(leaf.id);
     return (
       <SplitPaneSurface
         key={leaf.id}
@@ -1425,6 +1480,12 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
           setThreadPickerPaneId(leaf.id);
         }}
         onSelectThread={(threadId) => chooseThreadForPane(threadId, leaf.id)}
+        onNewTerminal={() => void openNewTerminalInPane(leaf.id)}
+        onSplitTerminal={
+          leafThreadId && terminalSplitDirection
+            ? () => void splitTerminalFromPane(leaf.id, leafThreadId, terminalSplitDirection)
+            : null
+        }
         onChatMounted={noop}
         onDropThread={(payload) => handleDropThreadOnPane(leaf.id, payload)}
       />
@@ -1513,6 +1574,7 @@ function SingleChatSurface(props: {
   const shouldUseDiffSheet = useMediaQuery(DIFF_INLINE_LAYOUT_MEDIA_QUERY);
   const createSplitView = useSplitViewStore((store) => store.createFromThread);
   const createSplitViewFromDrop = useSplitViewStore((store) => store.createFromDrop);
+  const createSiblingTerminalThread = useCreateSiblingTerminalThread();
   const panelState = useSingleChatPanelStore(selectSingleChatPanelState(props.threadId));
   const setThreadPanelState = useSingleChatPanelStore((store) => store.setThreadPanelState);
   const activePanel = panelState.panel;
@@ -1590,6 +1652,17 @@ function SingleChatSurface(props: {
     },
     [createSplitViewFromDrop, navigate, props.projectId, props.threadId],
   );
+
+  const handleSplitTerminal = useCallback(() => {
+    if (!props.projectId) return;
+    void createSiblingTerminalThread({
+      sourceThreadId: props.threadId,
+      fallbackProjectId: props.projectId,
+    }).then((terminalThreadId) => {
+      if (!terminalThreadId) return;
+      handleDropThread({ threadId: terminalThreadId, direction: "horizontal", side: "second" });
+    });
+  }, [createSiblingTerminalThread, handleDropThread, props.projectId, props.threadId]);
 
   useEffect(() => {
     const { nextAppliedSearchKey, panelPatch } = resolveRoutePanelBootstrap({
@@ -1696,6 +1769,7 @@ function SingleChatSurface(props: {
                 })
               }
               onSplitSurface={handleSplitSurface}
+              onSplitTerminal={handleSplitTerminal}
             />
           </SidebarInset>
         </ChatPaneDropOverlay>
@@ -1741,6 +1815,7 @@ function SingleChatSurface(props: {
               })
             }
             onSplitSurface={handleSplitSurface}
+            onSplitTerminal={handleSplitTerminal}
           />
         </SidebarInset>
       </ChatPaneDropOverlay>

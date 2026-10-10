@@ -35,8 +35,9 @@ export function useHandleNewThread() {
   const markTemporaryThread = useTemporaryThreadStore((store) => store.markTemporaryThread);
 
   const handleNewThread = useCallback(
-    (projectId: ProjectId, options?: NewThreadOptions): Promise<void> => {
+    (projectId: ProjectId, options?: NewThreadOptions): Promise<ThreadId | null> => {
       const entryPoint = options?.entryPoint ?? "chat";
+      const isBackground = options?.background === true;
       const wantsTemporaryThread = options?.temporary === true;
       const applyProviderOverride = (threadId: ThreadId) => {
         if (!options?.provider) {
@@ -82,7 +83,8 @@ export function useHandleNewThread() {
         setProjectDraftThreadId,
         setModelSelection,
       } = useComposerDraftStore.getState();
-      const shouldForceFreshThread = options?.fresh === true;
+      // Background creation never reuses a draft: the caller places the new thread itself.
+      const shouldForceFreshThread = options?.fresh === true || isBackground;
 
       if (shouldForceFreshThread) {
         clearProjectDraftThreadId(projectId, entryPoint);
@@ -198,7 +200,7 @@ export function useHandleNewThread() {
                 ),
               );
             }
-            return;
+            return bootstrapPlan.threadId;
           }
           await navigate({
             to: "/$threadId",
@@ -215,6 +217,7 @@ export function useHandleNewThread() {
               ),
             );
           }
+          return bootstrapPlan.threadId;
         })();
       }
 
@@ -240,9 +243,9 @@ export function useHandleNewThread() {
           return createTerminalThread(
             bootstrapPlan.threadId,
             resolveCreationState(bootstrapPlan.threadId, resolvedActiveDraftThread, options),
-          );
+          ).then(() => bootstrapPlan.threadId);
         }
-        return Promise.resolve();
+        return Promise.resolve(bootstrapPlan.threadId);
       }
 
       const threadId = newThreadId();
@@ -262,16 +265,19 @@ export function useHandleNewThread() {
         applyStickyState(threadId);
         applyProviderOverride(threadId);
 
-        await navigate({
-          to: "/$threadId",
-          params: { threadId },
-        });
+        if (!isBackground) {
+          await navigate({
+            to: "/$threadId",
+            params: { threadId },
+          });
+        }
         if (entryPoint === "terminal") {
           await createTerminalThread(
             threadId,
             resolveCreationState(threadId, getDraftThread(threadId), options),
           );
         }
+        return threadId;
       })();
     },
     [

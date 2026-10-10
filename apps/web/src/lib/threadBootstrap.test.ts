@@ -7,6 +7,7 @@ import {
   createActiveThreadSnapshot,
   createFreshDraftThreadSeed,
   hasDraftContextOverrides,
+  resolveSiblingThreadContextOptions,
   resolveTerminalThreadCreationState,
   resolveThreadBootstrapPlan,
   shouldReuseActiveDraftThread,
@@ -258,6 +259,34 @@ describe("threadBootstrap", () => {
       envMode: "local",
       worktreePath: null,
       branch: "feature/terminal-bootstrap",
+    });
+  });
+});
+
+describe("resolveSiblingThreadContextOptions", () => {
+  it("carries a server thread's worktree into the sibling thread", () => {
+    expect(
+      resolveSiblingThreadContextOptions({
+        thread: { branch: "feature/x", worktreePath: "/repo/.worktrees/x", envMode: "local" },
+        draftThread: null,
+      }),
+    ).toEqual({ branch: "feature/x", worktreePath: "/repo/.worktrees/x", envMode: "worktree" });
+  });
+
+  it("prefers the draft env mode when only a draft exists", () => {
+    expect(
+      resolveSiblingThreadContextOptions({
+        thread: undefined,
+        draftThread: makeDraftThread({ branch: null, worktreePath: null, envMode: "worktree" }),
+      }),
+    ).toEqual({ branch: null, worktreePath: null, envMode: "worktree" });
+  });
+
+  it("falls back to local with no source thread", () => {
+    expect(resolveSiblingThreadContextOptions({ thread: null, draftThread: null })).toEqual({
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
     });
   });
 });

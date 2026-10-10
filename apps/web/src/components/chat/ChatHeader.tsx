@@ -93,6 +93,8 @@ interface ChatHeaderProps {
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onDeleteProjectScript: (scriptId: string) => Promise<void>;
   onToggleTerminal: () => void;
+  // When set, the terminal menu item opens a new terminal thread in a split pane.
+  onSplitTerminal?: (() => void) | null;
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
   onCreateHandoff: (targetProvider: ProviderKind) => void;
@@ -151,6 +153,7 @@ export const ChatHeader = memo(function ChatHeader({
   onUpdateProjectScript,
   onDeleteProjectScript,
   onToggleTerminal,
+  onSplitTerminal = null,
   onToggleDiff,
   onToggleBrowser,
   onCreateHandoff,
@@ -402,15 +405,22 @@ export const ChatHeader = memo(function ChatHeader({
                   <span>Open in editor</span>
                 </MenuItem>
               ) : null}
-              <MenuItem onClick={onToggleTerminal} disabled={!terminalAvailable}>
-                <BsTerminal className="size-3.5 shrink-0" />
-                <span>{terminalOpen ? "Hide terminal" : "Show terminal"}</span>
-                {terminalToggleShortcutLabel && (
-                  <span className="ml-auto text-[11px] opacity-60">
-                    {terminalToggleShortcutLabel}
-                  </span>
-                )}
-              </MenuItem>
+              {onSplitTerminal && !terminalOpen ? (
+                <MenuItem onClick={onSplitTerminal} disabled={!terminalAvailable}>
+                  <BsTerminal className="size-3.5 shrink-0" />
+                  <span>Split terminal</span>
+                </MenuItem>
+              ) : (
+                <MenuItem onClick={onToggleTerminal} disabled={!terminalAvailable}>
+                  <BsTerminal className="size-3.5 shrink-0" />
+                  <span>{terminalOpen ? "Hide terminal" : "Show terminal"}</span>
+                  {terminalToggleShortcutLabel && (
+                    <span className="ml-auto text-[11px] opacity-60">
+                      {terminalToggleShortcutLabel}
+                    </span>
+                  )}
+                </MenuItem>
+              )}
               {isElectron ? (
                 <MenuItem onClick={onToggleBrowser}>
                   <GlobeIcon className="size-3.5 shrink-0" />

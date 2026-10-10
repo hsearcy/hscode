@@ -21,6 +21,7 @@ import {
   resolvePreferredComposerModelSelection,
 } from "../composerDraftStore";
 import { DEFAULT_INTERACTION_MODE, type ThreadPrimarySurface } from "../types";
+import { resolveThreadEnvironmentMode } from "./threadEnvironment";
 
 export interface NewThreadOptions {
   branch?: string | null;
@@ -30,6 +31,32 @@ export interface NewThreadOptions {
   temporary?: boolean;
   provider?: ProviderKind;
   fresh?: boolean;
+  // Create a fresh thread without routing to it; callers (e.g. split panes) place it themselves.
+  background?: boolean;
+}
+
+interface ThreadWorkspaceContextSource {
+  branch: string | null;
+  worktreePath: string | null;
+  envMode?: ThreadEnvironmentMode | undefined;
+}
+
+// Carry the source thread's branch/worktree into a new sibling thread so it opens in the same folder.
+export function resolveSiblingThreadContextOptions(input: {
+  thread: ThreadWorkspaceContextSource | null | undefined;
+  draftThread: (ThreadWorkspaceContextSource & { envMode: DraftThreadEnvMode }) | null | undefined;
+}): Pick<NewThreadOptions, "branch" | "worktreePath" | "envMode"> {
+  const { thread, draftThread } = input;
+  return {
+    branch: thread?.branch ?? draftThread?.branch ?? null,
+    worktreePath: thread?.worktreePath ?? draftThread?.worktreePath ?? null,
+    envMode:
+      draftThread?.envMode ??
+      resolveThreadEnvironmentMode({
+        envMode: thread?.envMode,
+        worktreePath: thread?.worktreePath ?? null,
+      }),
+  };
 }
 
 interface ActiveThreadSnapshot {
