@@ -2847,20 +2847,40 @@ describe("WebSocket Server", () => {
     connections.push(ws);
     const createdAt = new Date().toISOString();
     await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
-      type: "project.create", commandId: "cmd-command-project", projectId: "command-project",
-      title: "Command Project", workspaceRoot: makeTempDir("hscode-command-"),
-      defaultModelSelection: { provider: "codex", model: "gpt-5-codex" }, createdAt,
+      type: "project.create",
+      commandId: "cmd-command-project",
+      projectId: "command-project",
+      title: "Command Project",
+      workspaceRoot: makeTempDir("hscode-command-"),
+      defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+      createdAt,
     });
     await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
-      type: "thread.create", commandId: "cmd-command-thread", threadId: "command-thread",
-      projectId: "command-project", title: "Saved thread",
-      modelSelection: { provider: "codex", model: "gpt-5-codex" }, runtimeMode: "full-access",
-      interactionMode: "terminal-cli", branch: null, worktreePath: null, cliKind: "claude", createdAt,
+      type: "thread.create",
+      commandId: "cmd-command-thread",
+      threadId: "command-thread",
+      projectId: "command-project",
+      title: "Saved thread",
+      modelSelection: { provider: "codex", model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "terminal-cli",
+      branch: null,
+      worktreePath: null,
+      cliKind: "claude",
+      createdAt,
     });
     const result = await sendRequest(ws, WS_METHODS.serverGetCommandView, {});
-    expect(result.result).toMatchObject({ threads: [expect.objectContaining({
-      id: "command-thread", title: "Saved thread", status: "idle", response: null,
-    })], totalThreads: 1 });
+    expect(result.result).toMatchObject({
+      threads: [
+        expect.objectContaining({
+          id: "command-thread",
+          title: "Saved thread",
+          status: "idle",
+          response: null,
+        }),
+      ],
+      totalThreads: 1,
+    });
     expect(open).not.toHaveBeenCalled();
     expect(terminalManager.writeInputs).toEqual([]);
   });
@@ -2987,10 +3007,9 @@ describe("WebSocket Server", () => {
     };
     expect((await getThread())?.cliSessionId).toBe(sessionId);
     appendTitle('New "Codex" title');
-    await vi.waitFor(
-      async () => expect((await getThread())?.title).toBe('New "Codex" title'),
-      { timeout: 5000 },
-    );
+    await vi.waitFor(async () => expect((await getThread())?.title).toBe('New "Codex" title'), {
+      timeout: 5000,
+    });
     terminalManager.emitEvent({
       type: "cli-session",
       threadId: "recovery-thread",

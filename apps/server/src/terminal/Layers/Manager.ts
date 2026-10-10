@@ -1528,6 +1528,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     managedAgentObserved: boolean;
     agentState: TerminalActivityState | null;
     lastActivityAt: string;
+    lastInputAt?: string;
+    hasProviderProcess: boolean | null;
   } | null {
     const session = this.sessions.get(toSessionKey(threadId, terminalId));
     if (!session) return null;
@@ -1538,7 +1540,12 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       managedAgentRunning: session.managedAgentRunning,
       managedAgentObserved: session.managedAgentObserved,
       agentState: session.managedAgentState,
-      lastActivityAt: new Date(Math.max(session.lastInputAt ?? 0, session.lastOutputAt ?? 0, session.spawnedAt ?? 0) || Date.parse(session.updatedAt)).toISOString(),
+      hasProviderProcess: session.hasProviderProcess ?? null,
+      ...(session.lastInputAt ? { lastInputAt: new Date(session.lastInputAt).toISOString() } : {}),
+      lastActivityAt: new Date(
+        Math.max(session.lastInputAt ?? 0, session.lastOutputAt ?? 0, session.spawnedAt ?? 0) ||
+          Date.parse(session.updatedAt),
+      ).toISOString(),
     };
   }
 
@@ -1798,6 +1805,18 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   }
 
   private emitCliMetaSignal(session: TerminalSessionState, cliMeta: CliSessionMetaSignal): void {
+    // Claude SessionStart (startup / --resume / compact) forwards CLI
+    // metadata without a Start/Stop OSC. Treat first contact as a managed
+    // agent sitting idle at the prompt so idle-sleep can reap it. Do not
+    // emit an activity event: this is not a turn completion, and paging
+    // notify_on_idle subscribers on every resume would be noise.
+    if (!session.managedAgentObserved) {
+      session.managedAgentObserved = true;
+      if (session.managedAgentState === null) {
+        session.managedAgentState = "review";
+        session.managedAgentRunning = false;
+      }
+    }
     this.emitEvent({
       type: "cli-session",
       threadId: session.threadId,
@@ -1852,9 +1871,12 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (normalizedSignature.length > 0 && normalizedSignature !== session.lastOutputSignature) {
         // Only refresh on genuinely new output. Repeated identical redraws (idle prompt
         // repaints) are ignored so they do not pin the provider in a "busy" state forever.
-        // When hooks are active (managedAgentObserved), hooks are the source of truth anyway;
-        // this heuristic only matters for unmanaged terminals.
-        session.lastOutputAt = Date.now();
+        // When hooks have parked the agent in review, unique idle-TUI frames
+        // (Claude's status-line clock, etc.) must not refresh lastOutputAt
+        // either — idle-sleep keys off that timestamp.
+        if (!(session.managedAgentObserved && !session.managedAgentRunning)) {
+          session.lastOutputAt = Date.now();
+        }
         session.lastOutputSignature = normalizedSignature;
       }
     }
@@ -2350,10 +2372,12 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           const terminalPid = session.pid;
           let hasRunningSubprocess = false;
           let terminalCliKind: TerminalCliKind | null = null;
+          let hasProviderProcess: boolean | null = null;
           try {
-            const subprocessActivity = normalizeSubprocessActivity(
-              await this.subprocessChecker(terminalPid),
-            );
+            const processResult = await this.subprocessChecker(terminalPid);
+            const subprocessActivity = normalizeSubprocessActivity(processResult);
+            hasProviderProcess =
+              typeof processResult === "boolean" ? null : subprocessActivity.hasProviderDescendant;
             terminalCliKind = subprocessActivity.cliKind ?? session.detectedCliKind;
             if (session.managedAgentObserved) {
               // Hooks have fired — trust them as the sole source of truth (superset model).
@@ -2390,11 +2414,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
 
           if (
             liveSession.hasRunningSubprocess === hasRunningSubprocess &&
-            liveSession.detectedCliKind === terminalCliKind
+            liveSession.detectedCliKind === terminalCliKind &&
+            liveSession.hasProviderProcess === hasProviderProcess
           ) {
             return;
           }
 
+          liveSession.hasProviderProcess = hasProviderProcess;
           liveSession.hasRunningSubprocess = hasRunningSubprocess;
           liveSession.detectedCliKind = terminalCliKind;
           liveSession.updatedAt = new Date().toISOString();

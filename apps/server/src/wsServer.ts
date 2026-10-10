@@ -1523,9 +1523,10 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       initialThread.cliKind === "claudex" && input.cliKind === "claude" ? "claudex" : input.cliKind;
     const codexMetadata =
       effectiveCliKind === "codex"
-        ? yield* Effect.promise(async () =>
-            (input.sessionId ? await codexSessionMetadata.resolve(input.sessionId) : null) ??
-            (await codexSessionMetadata.resolve(initialThread.cliSessionId, initialThread.title)),
+        ? yield* Effect.promise(
+            async () =>
+              (input.sessionId ? await codexSessionMetadata.resolve(input.sessionId) : null) ??
+              (await codexSessionMetadata.resolve(initialThread.cliSessionId, initialThread.title)),
           )
         : null;
     // File reads can overlap a manual title change. Use the current projection
@@ -2667,9 +2668,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
       case WS_METHODS.serverGetCommandView: {
         const model = yield* orchestrationEngine.getReadModel();
-        return yield* Effect.promise(() => commandViewReader.read(model, (threadId) =>
-          runPromise(terminalManager.getSessionActivity(threadId, DEFAULT_TERMINAL_ID)),
-        ));
+        return yield* Effect.promise(() =>
+          commandViewReader.read(model, (threadId) =>
+            runPromise(terminalManager.getSessionActivity(threadId, DEFAULT_TERMINAL_ID)),
+          ),
+        );
       }
       case WS_METHODS.serverGetConfig:
         const keybindingsConfig = yield* keybindingsManager.loadConfigState;

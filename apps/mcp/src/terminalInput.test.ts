@@ -65,13 +65,7 @@ describe("sendTerminalInput", () => {
 
     const bytesSent = await sendTerminalInput(recordingWriter(events), "", true);
 
-    expect(events).toEqual([
-      'write:"§"',
-      "settle",
-      'write:"\u007f"',
-      "settle",
-      'write:"\\r"',
-    ]);
+    expect(events).toEqual(['write:"§"', "settle", 'write:"\u007f"', "settle", 'write:"\\r"']);
     expect(bytesSent).toBe(Buffer.byteLength("§\u007f\r", "utf8"));
   });
 });

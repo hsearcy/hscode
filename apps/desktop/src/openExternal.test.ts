@@ -46,7 +46,9 @@ describe("openExternal", () => {
     mocks.execFile.mockImplementation((_command, _args, _options, callback) =>
       callback(new Error("Windows interop unavailable")),
     );
-    await expect(openExternal("https://example.com")).rejects.toThrow("Windows interop unavailable");
+    await expect(openExternal("https://example.com")).rejects.toThrow(
+      "Windows interop unavailable",
+    );
     expect(mocks.openExternal).not.toHaveBeenCalled();
   });
 

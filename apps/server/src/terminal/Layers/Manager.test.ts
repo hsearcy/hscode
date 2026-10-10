@@ -191,7 +191,9 @@ describe("TerminalManager", () => {
     historyLineLimit = 5,
     options: {
       shellResolver?: () => string;
-      subprocessChecker?: (terminalPid: number) => Promise<boolean>;
+      subprocessChecker?: (
+        terminalPid: number,
+      ) => Promise<boolean | ReturnType<typeof classifyTerminalSubprocessTree>>;
       subprocessPollIntervalMs?: number;
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
@@ -435,6 +437,32 @@ describe("TerminalManager", () => {
     expect(process.writes).toEqual([]);
 
     manager.dispose();
+  });
+
+  it("reports provider process disappearance while its shell remains open", async () => {
+    let alive = true;
+    const { manager } = makeManager(5, {
+      subprocessChecker: async () => ({
+        cliKind: alive ? "codex" : null,
+        hasProviderDescendant: alive,
+        hasRunningSubprocess: alive,
+        hasNonProviderSubprocess: false,
+      }),
+      subprocessPollIntervalMs: 20,
+    });
+    try {
+      await manager.open(openInput());
+      await waitFor(
+        () => manager.getSessionActivity("thread-1", "default")?.hasProviderProcess === true,
+      );
+      alive = false;
+      await waitFor(
+        () => manager.getSessionActivity("thread-1", "default")?.hasProviderProcess === false,
+      );
+      expect(manager.getSessionActivity("thread-1", "default")?.status).toBe("running");
+    } finally {
+      manager.dispose();
+    }
   });
 
   it("emits subprocess activity events when child-process state changes", async () => {
@@ -1086,6 +1114,90 @@ describe("TerminalManager", () => {
     expect(woken.history).toContain("turn output");
     expect(manager.consumeWasNewlySpawned("thread-1", DEFAULT_TERMINAL_ID)).toBe(true);
     expect(ptyAdapter.processes).toHaveLength(2);
+
+    manager.dispose();
+  });
+
+  it("sleeps a Claude session that only got SessionStart CLI metadata (resume sitting at the prompt)", async () => {
+    // Claude fires SessionStart on --resume and never a Stop until the user
+    // submits a turn. That must still be sleep-eligible: the CLI is idle at
+    // the prompt, not mid-turn.
+    const { manager, ptyAdapter, logsDir } = makeManager(50, {
+      subprocessChecker: async () => false,
+      subprocessPollIntervalMs: 20,
+      processKillGraceMs: 10,
+      idleSleepMs: 60,
+      idleSleepCheckIntervalMs: 20,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+
+    await manager.open(openInput());
+    const firstProcess = ptyAdapter.processes[0];
+    expect(firstProcess).toBeDefined();
+    if (!firstProcess) return;
+    firstProcess.emitData("resume splash\r\n");
+
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    const meta = Buffer.from(
+      JSON.stringify({
+        cliKind: "claude",
+        sessionId: "claude-session-1",
+        summary: "",
+        cwd: "",
+      }),
+    ).toString("base64");
+    fs.appendFileSync(sinkPath, `\u001b]633;T3CODE_CLI_META=${meta}\u0007\n`);
+
+    await waitFor(() => events.some((event) => event.type === "slept"), 2_000);
+    expect(firstProcess.killed).toBe(true);
+    expect(events.some((event) => event.type === "exited")).toBe(false);
+
+    manager.dispose();
+  });
+
+  it("still sleeps a completed turn even when the idle TUI keeps redrawing unique frames", async () => {
+    // Claude's idle prompt repaints with a changing status line. Those frames
+    // must not refresh lastOutputAt or the session can never reach idleSleepMs.
+    const { manager, ptyAdapter, logsDir } = makeManager(50, {
+      subprocessChecker: async () => false,
+      subprocessPollIntervalMs: 20,
+      processKillGraceMs: 10,
+      idleSleepMs: 80,
+      idleSleepCheckIntervalMs: 20,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+
+    await manager.open(openInput());
+    const firstProcess = ptyAdapter.processes[0];
+    expect(firstProcess).toBeDefined();
+    if (!firstProcess) return;
+
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    fs.appendFileSync(sinkPath, "\u001b]633;T3CODE_AGENT_EVENT=Stop\u0007\n");
+    await waitFor(() =>
+      events.some((event) => event.type === "activity" && event.agentState === "review"),
+    );
+
+    let frame = 0;
+    const redraw = setInterval(() => {
+      frame += 1;
+      firstProcess.emitData(`idle frame ${frame} ${Date.now()}\r\n`);
+    }, 25);
+
+    try {
+      await waitFor(() => events.some((event) => event.type === "slept"), 2_000);
+    } finally {
+      clearInterval(redraw);
+    }
+    expect(firstProcess.killed).toBe(true);
 
     manager.dispose();
   });

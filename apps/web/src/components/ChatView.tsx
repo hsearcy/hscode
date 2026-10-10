@@ -1,3 +1,4 @@
+import { useCommandViewState } from "../commandViewState";
 import type { TerminalActivityUpdate } from "../terminalActivity";
 import {
   type ApprovalRequestId,
@@ -1049,6 +1050,9 @@ export default function ChatView({
   const resolvedDiffOpen = panelState ? panelState.panel === "diff" : diffOpen;
   const resolvedBrowserOpen = panelState ? panelState.panel === "browser" : browserOpen;
   const activeThreadId = activeThread?.id ?? null;
+  useEffect(() => {
+    if (activeThreadId) useCommandViewState.getState().markReviewed(activeThreadId);
+  }, [activeThreadId]);
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const hasLiveTurnTail = hasLiveTurnTailWork({

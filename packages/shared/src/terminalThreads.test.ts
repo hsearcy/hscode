@@ -20,7 +20,9 @@ describe("terminalThreads", () => {
   it("recognizes Grok as a terminal command", () => {
     expect(terminalCliKindFromValue("grok")).toBe("grok");
     expect(defaultTerminalTitleForCliKind("grok")).toBe("Grok");
-    expect(deriveTerminalCommandIdentity("grok --resume 550e8400-e29b-41d4-a716-446655440000")).toEqual({
+    expect(
+      deriveTerminalCommandIdentity("grok --resume 550e8400-e29b-41d4-a716-446655440000"),
+    ).toEqual({
       cliKind: "grok",
       iconKey: "grok",
       title: "Grok",

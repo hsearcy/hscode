@@ -28,6 +28,8 @@ export interface TerminalSessionActivity {
   status: TerminalSessionStatus;
   agentState?: TerminalActivityState | null;
   lastActivityAt?: string;
+  lastInputAt?: string;
+  hasProviderProcess?: boolean | null;
   hasRunningSubprocess: boolean;
   detectedCliKind: TerminalCliKind | null;
   managedAgentRunning: boolean;
@@ -73,6 +75,7 @@ export interface TerminalSessionState {
   managedAgentState: TerminalActivityState | null;
   /** True once at least one hook event (Start/Stop/PermissionRequest) has been observed. */
   managedAgentObserved: boolean;
+  hasProviderProcess?: boolean | null;
   /**
    * Monotonic count of Stop hook events (completed agent turns). Carried on
    * activity events so subscribers can see a fresh completion edge even when

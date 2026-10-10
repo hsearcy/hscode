@@ -169,9 +169,7 @@ export function reconcileSubscriptions(
 function sameStringRecord(left: Record<string, string>, right: Record<string, string>): boolean {
   const leftKeys = Object.keys(left);
   const rightKeys = Object.keys(right);
-  return (
-    leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key])
-  );
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
 }
 
 function sameStates(left: SubscriptionState[], right: SubscriptionState[]): boolean {

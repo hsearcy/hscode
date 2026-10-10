@@ -154,6 +154,12 @@ describe("managed terminal wrappers", () => {
         input: JSON.stringify(payload),
         env: {
           ...process.env,
+          // Tests often run inside a managed HS Code terminal whose hook
+          // identity would otherwise leak into the notify script (Claude Stop
+          // payloads growing a Grok CLI_META line, etc.).
+          T3CODE_TERMINAL_CLI_KIND: "",
+          GROK_SESSION_ID: "",
+          GROK_HOOK_EVENT: "",
           T3CODE_TERMINAL_EVENT_SINK: sinkPath,
           CODEX_TUI_SESSION_LOG_PATH: tuiLogPath,
           ...options.env,
@@ -184,6 +190,21 @@ describe("managed terminal wrappers", () => {
         message: "Claude is waiting for your input",
       });
       expect(sink).not.toContain("T3CODE_AGENT_EVENT=");
+    });
+
+    it("does not treat SessionStart (startup, resume, or compact) as a turn start", () => {
+      // Regression: mapping SessionStart → Start parked every resumed Claude
+      // session in "running" with no matching Stop, so idle-sleep never fired.
+      // SessionStart still forwards CLI metadata (session id / title / cwd).
+      for (const source of ["startup", "resume", "compact"]) {
+        const sink = runNotifyHook({
+          hook_event_name: "SessionStart",
+          source,
+          session_id: "claude-session-1",
+        });
+        expect(sink).not.toContain("T3CODE_AGENT_EVENT=");
+        expect(sink).toContain("T3CODE_CLI_META=");
+      }
     });
 
     it("still emits a review signal for Stop hook events", () => {
@@ -454,11 +475,9 @@ describe("managed terminal wrappers", () => {
     const wrapperDir = path.join(tempDir, "wrappers");
     const grokHome = path.join(tempDir, "grok-home");
     fs.mkdirSync(sourceBinDir);
-    fs.writeFileSync(
-      path.join(sourceBinDir, "grok"),
-      '#!/bin/sh\nprintf "grok-ok %s" "$*"\n',
-      { mode: 0o755 },
-    );
+    fs.writeFileSync(path.join(sourceBinDir, "grok"), '#!/bin/sh\nprintf "grok-ok %s" "$*"\n', {
+      mode: 0o755,
+    });
 
     const state = prepareManagedTerminalWrappers({
       baseEnv: { PATH: sourceBinDir },

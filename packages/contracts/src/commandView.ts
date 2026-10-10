@@ -2,7 +2,12 @@ import { Schema } from "effect";
 import { ProjectId, ThreadId } from "./baseSchemas";
 
 export const CommandThreadStatus = Schema.Literals([
-  "attention", "working", "review", "asleep", "idle", "error",
+  "attention",
+  "working",
+  "review",
+  "asleep",
+  "idle",
+  "error",
 ]);
 export type CommandThreadStatus = typeof CommandThreadStatus.Type;
 
@@ -14,6 +19,8 @@ export const CommandThread = Schema.Struct({
   agent: Schema.String,
   cwd: Schema.String,
   status: CommandThreadStatus,
+  statusVersion: Schema.optional(Schema.String),
+  reviewAt: Schema.optional(Schema.String),
   lastActivityAt: Schema.String,
   response: Schema.NullOr(Schema.String),
   responseAt: Schema.NullOr(Schema.String),

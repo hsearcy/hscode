@@ -304,7 +304,11 @@ case "$_t3code_event" in
     _t3code_emit_grok_meta
     ;;
   SessionStart)
-    _t3code_emit_osc '${buildHookOscSequence("Start")}'
+    # SessionStart fires on startup, --resume, /clear, and compact. None of
+    # those is a turn in progress — emitting Start parked resumed Claude
+    # sessions in "running" with no matching Stop, so idle-sleep never
+    # fired. Forward CLI metadata only; the server treats first contact as
+    # an idle managed agent sitting at the prompt.
     _t3code_emit_claude_meta
     _t3code_emit_grok_meta
     ;;

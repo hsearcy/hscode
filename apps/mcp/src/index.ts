@@ -51,10 +51,7 @@ import {
 } from "./subscriptionStore.ts";
 import { sendTerminalInput } from "./terminalInput.ts";
 import { createThreadEventGate } from "./threadEventGate.ts";
-import {
-  claimWebhookDelivery,
-  pruneWebhookDeliveryClaims,
-} from "./webhookDeliveryClaims.ts";
+import { claimWebhookDelivery, pruneWebhookDeliveryClaims } from "./webhookDeliveryClaims.ts";
 
 const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.5",
@@ -1103,8 +1100,7 @@ function registerTools(server: McpServer): void {
       const cliKind = args.provider;
       const providerKind = cliKind === "claude" ? "claudeAgent" : "codex";
       const model = DEFAULT_MODEL_BY_PROVIDER[providerKind];
-      const cliLabel =
-        cliKind === "claude" ? "Claude Code" : cliKind === "grok" ? "Grok" : "Codex";
+      const cliLabel = cliKind === "claude" ? "Claude Code" : cliKind === "grok" ? "Grok" : "Codex";
       const title = args.title?.trim() || `${cliLabel} — ${project.title}`;
       const threadId = randomUUID();
       const createdAt = new Date().toISOString();

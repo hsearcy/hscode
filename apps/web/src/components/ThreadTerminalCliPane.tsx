@@ -32,7 +32,11 @@ interface ThreadTerminalCliPaneProps {
   cliKind?: TerminalCliKind | null;
 }
 
-export default function ThreadTerminalCliPane({ threadId, cwd: cwdOverride, cliKind: cliKindOverride }: ThreadTerminalCliPaneProps) {
+export default function ThreadTerminalCliPane({
+  threadId,
+  cwd: cwdOverride,
+  cliKind: cliKindOverride,
+}: ThreadTerminalCliPaneProps) {
   const selectThread = useMemo(() => createThreadSelector(threadId), [threadId]);
   const thread = useStore(selectThread);
   const selectProject = useMemo(
