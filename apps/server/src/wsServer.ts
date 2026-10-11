@@ -132,6 +132,14 @@ import {
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 import { AppConfigRepository } from "./persistence/Services/AppConfig.ts";
 
+// Titles saved under the old 48-char cap end in "…"; when the full summary
+// extends one, the CLI still owns it and may replace it with the full text.
+function isLegacyTruncatedCliTitle(title: string, summary: string): boolean {
+  return (
+    title.endsWith("…") && title.length > 1 && summary.startsWith(title.slice(0, -1).trimEnd())
+  );
+}
+
 const CODEX_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -1477,7 +1485,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   >();
   const runPromise = Effect.runPromiseWith(runtimeServices);
 
-  const CLI_SUMMARY_TITLE_MAX = 48;
+  // The sidebar truncates titles visually and shows the full one on hover, so
+  // only guard against runaway summaries here.
+  const CLI_SUMMARY_TITLE_MAX = 200;
   const truncateCliSummary = (summary: string) =>
     summary.length > CLI_SUMMARY_TITLE_MAX
       ? `${summary.slice(0, CLI_SUMMARY_TITLE_MAX - 1).trimEnd()}…`
@@ -1556,6 +1566,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           [...codexMetadata.previousTitles].some(
             (title) => truncateCliSummary(title) === thread.title,
           )) ||
+        isLegacyTruncatedCliTitle(thread.title, truncatedSummary) ||
         isAutoDerivedTerminalTitle(thread.title, effectiveCliKind));
     if (truncatedSummary.length > 0 && (shouldUpdateTitle || truncatedSummary === thread.title)) {
       cliManagedTitleByThreadId.set(input.threadId, {

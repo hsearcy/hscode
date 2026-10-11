@@ -389,8 +389,8 @@ function SidebarRail({
   const railRef = React.useRef<HTMLButtonElement | null>(null);
   const suppressClickRef = React.useRef(false);
   const resizeStateRef = React.useRef<{
+    detachWindowListeners: () => void;
     moved: boolean;
-    pointerId: number;
     pendingWidth: number;
     rail: HTMLButtonElement;
     rafId: number | null;
@@ -413,6 +413,7 @@ function SidebarRail({
       if (!resizeState) {
         return;
       }
+      resizeState.detachWindowListeners();
       if (resizeState.rafId !== null) {
         window.cancelAnimationFrame(resizeState.rafId);
       }
@@ -429,6 +430,54 @@ function SidebarRail({
       }
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
+    },
+    [resolvedResizable],
+  );
+
+  const applyResizeMove = React.useCallback(
+    (clientX: number) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState || !resolvedResizable) return;
+
+      const delta =
+        resizeState.side === "right" ? resizeState.startX - clientX : clientX - resizeState.startX;
+      if (Math.abs(delta) > 2) {
+        resizeState.moved = true;
+      }
+      resizeState.pendingWidth = clampSidebarWidth(
+        resizeState.startWidth + delta,
+        resolvedResizable,
+      );
+      if (resizeState.rafId !== null) {
+        return;
+      }
+
+      resizeState.rafId = window.requestAnimationFrame(() => {
+        const activeResizeState = resizeStateRef.current;
+        if (!activeResizeState || !resolvedResizable) return;
+
+        activeResizeState.rafId = null;
+        const nextWidth = activeResizeState.pendingWidth;
+        // Shrinking is always allowed: on a narrow window the current width can
+        // already violate shouldAcceptWidth, which would otherwise freeze the rail.
+        const accepted =
+          nextWidth <= activeResizeState.width ||
+          (resolvedResizable.shouldAcceptWidth?.({
+            currentWidth: activeResizeState.width,
+            nextWidth,
+            rail: activeResizeState.rail,
+            side: activeResizeState.side,
+            sidebarRoot: activeResizeState.sidebarRoot,
+            wrapper: activeResizeState.wrapper,
+          }) ??
+            true);
+        if (!accepted) {
+          return;
+        }
+
+        activeResizeState.wrapper.style.setProperty("--sidebar-width", `${nextWidth}px`);
+        activeResizeState.width = nextWidth;
+      });
     },
     [resolvedResizable],
   );
@@ -464,9 +513,41 @@ function SidebarRail({
 
       event.preventDefault();
       event.stopPropagation();
+
+      // Follow the drag on the window from any pointer or mouse event instead of
+      // filtering by pointerId: under WSLg the press arrives as a "mouse" pointer
+      // while the following moves arrive as a "pen" pointer with another id, so
+      // id-filtered handlers on the rail never saw a single move.
+      const pointerId = event.pointerId;
+      const onWindowMove = (moveEvent: PointerEvent | MouseEvent) => {
+        if ((moveEvent.buttons & 1) === 0) return;
+        moveEvent.preventDefault();
+        applyResizeMove(moveEvent.clientX);
+      };
+      const onWindowRelease = () => {
+        const resizeState = resizeStateRef.current;
+        if (!resizeState) return;
+        suppressClickRef.current = resizeState.moved;
+        stopResize(pointerId);
+      };
+      window.addEventListener("pointermove", onWindowMove, true);
+      window.addEventListener("mousemove", onWindowMove, true);
+      window.addEventListener("pointerup", onWindowRelease, true);
+      window.addEventListener("mouseup", onWindowRelease, true);
+      window.addEventListener("pointercancel", onWindowRelease, true);
+      window.addEventListener("blur", onWindowRelease);
+      const detachWindowListeners = () => {
+        window.removeEventListener("pointermove", onWindowMove, true);
+        window.removeEventListener("mousemove", onWindowMove, true);
+        window.removeEventListener("pointerup", onWindowRelease, true);
+        window.removeEventListener("mouseup", onWindowRelease, true);
+        window.removeEventListener("pointercancel", onWindowRelease, true);
+        window.removeEventListener("blur", onWindowRelease);
+      };
+
       resizeStateRef.current = {
+        detachWindowListeners,
         moved: false,
-        pointerId: event.pointerId,
         pendingWidth: initialWidth,
         rail: event.currentTarget,
         rafId: null,
@@ -479,90 +560,15 @@ function SidebarRail({
         wrapper,
       };
       wrapper.style.setProperty("--sidebar-width", `${initialWidth}px`);
-      event.currentTarget.setPointerCapture(event.pointerId);
+      try {
+        event.currentTarget.setPointerCapture(pointerId);
+      } catch {
+        // Capture is best-effort; the window listeners already follow the drag.
+      }
       document.body.style.cursor = "col-resize";
       document.body.style.userSelect = "none";
     },
-    [onPointerDown, open, resolvedResizable, sidebarInstance?.side],
-  );
-
-  const handlePointerMove = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      onPointerMove?.(event);
-      if (event.defaultPrevented) return;
-      const resizeState = resizeStateRef.current;
-      if (!resizeState || resizeState.pointerId !== event.pointerId || !resolvedResizable) return;
-
-      event.preventDefault();
-      const delta =
-        resizeState.side === "right"
-          ? resizeState.startX - event.clientX
-          : event.clientX - resizeState.startX;
-      if (Math.abs(delta) > 2) {
-        resizeState.moved = true;
-      }
-      resizeState.pendingWidth = clampSidebarWidth(
-        resizeState.startWidth + delta,
-        resolvedResizable,
-      );
-      if (resizeState.rafId !== null) {
-        return;
-      }
-
-      resizeState.rafId = window.requestAnimationFrame(() => {
-        const activeResizeState = resizeStateRef.current;
-        if (!activeResizeState || !resolvedResizable) return;
-
-        activeResizeState.rafId = null;
-        const nextWidth = activeResizeState.pendingWidth;
-        const accepted =
-          resolvedResizable.shouldAcceptWidth?.({
-            currentWidth: activeResizeState.width,
-            nextWidth,
-            rail: activeResizeState.rail,
-            side: activeResizeState.side,
-            sidebarRoot: activeResizeState.sidebarRoot,
-            wrapper: activeResizeState.wrapper,
-          }) ?? true;
-        if (!accepted) {
-          return;
-        }
-
-        activeResizeState.wrapper.style.setProperty("--sidebar-width", `${nextWidth}px`);
-        activeResizeState.width = nextWidth;
-      });
-    },
-    [onPointerMove, resolvedResizable],
-  );
-
-  const endResizeInteraction = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      const resizeState = resizeStateRef.current;
-      if (!resizeState || resizeState.pointerId !== event.pointerId) return;
-
-      event.preventDefault();
-      suppressClickRef.current = resizeState.moved;
-      stopResize(event.pointerId);
-    },
-    [stopResize],
-  );
-
-  const handlePointerUp = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      onPointerUp?.(event);
-      if (event.defaultPrevented) return;
-      endResizeInteraction(event);
-    },
-    [endResizeInteraction, onPointerUp],
-  );
-
-  const handlePointerCancel = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      onPointerCancel?.(event);
-      if (event.defaultPrevented) return;
-      endResizeInteraction(event);
-    },
-    [endResizeInteraction, onPointerCancel],
+    [applyResizeMove, onPointerDown, open, resolvedResizable, sidebarInstance?.side, stopResize],
   );
 
   const handleClick = React.useCallback(
@@ -600,6 +606,7 @@ function SidebarRail({
   React.useEffect(() => {
     return () => {
       const resizeState = resizeStateRef.current;
+      resizeState?.detachWindowListeners();
       if (resizeState?.rafId != null) {
         window.cancelAnimationFrame(resizeState.rafId);
       }
@@ -627,10 +634,10 @@ function SidebarRail({
       data-sidebar="rail"
       data-slot="sidebar-rail"
       onClick={handleClick}
-      onPointerCancel={handlePointerCancel}
+      onPointerCancel={onPointerCancel}
       onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
       ref={railRef}
       tabIndex={-1}
       title={railTitle}

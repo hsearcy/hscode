@@ -3124,6 +3124,64 @@ describe("WebSocket Server", () => {
     expect(thread?.title).toBe("Manual HS Code title");
   });
 
+  it("stores full Claude summary titles and expands titles cut by the old 48-char cap", async () => {
+    const terminalManager = new MockTerminalManager();
+    server = await createTestServer({
+      cwd: "/test",
+      terminalManager,
+    });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const [ws] = await connectAndAwaitWelcome(port);
+    connections.push(ws);
+
+    const workspaceRoot = makeTempDir("t3code-ws-claude-full-title-");
+    const createdAt = new Date().toISOString();
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "project.create",
+      commandId: "cmd-claude-full-title-project-create",
+      projectId: "project-claude-full-title",
+      title: "Claude Full Title Project",
+      workspaceRoot,
+      defaultModelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
+      createdAt,
+    });
+    await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "thread.create",
+      commandId: "cmd-claude-full-title-thread-create",
+      threadId: "thread-claude-full-title",
+      projectId: "project-claude-full-title",
+      title: "Copy-on-write clones in GitHub workflows and wo…",
+      modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+
+    const fullTitle = "Copy-on-write clones in GitHub workflows and worktrees for faster CI";
+    terminalManager.emitEvent({
+      type: "cli-session",
+      threadId: "thread-claude-full-title",
+      terminalId: DEFAULT_TERMINAL_ID,
+      createdAt: new Date().toISOString(),
+      cliKind: "claude",
+      sessionId: "claude-session-full-title",
+      summary: fullTitle,
+      cwd: workspaceRoot,
+    });
+    await waitForPush(
+      ws,
+      ORCHESTRATION_WS_CHANNELS.domainEvent,
+      (push) =>
+        (push.data as { type?: string; payload?: { title?: string } }).type ===
+          "thread.meta-updated" &&
+        (push.data as { payload?: { title?: string } }).payload?.title === fullTitle,
+    );
+  });
+
   it("detaches terminal event listeners on stop for injected manager", async () => {
     const terminalManager = new MockTerminalManager();
     server = await createTestServer({

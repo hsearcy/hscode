@@ -933,6 +933,18 @@ function ChatSortMenu({
   );
 }
 
+// Shows the full thread title after the default tooltip delay; row titles truncate.
+function SidebarThreadTitleTooltip(props: { title: string; children: React.ReactElement }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={props.children} />
+      <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
+        {props.title}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
 function SidebarPrimaryAction({
   icon: Icon,
   label,
@@ -3970,35 +3982,28 @@ export default function Sidebar() {
             {leadingPrStatus ? (
               <ThreadPrStatusBadge prStatus={leadingPrStatus} onOpen={openPrLink} />
             ) : null}
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    className={cn(
-                      "min-w-0 flex-1 truncate transition-opacity group-hover/thread-row:opacity-100",
-                      isActive ? "opacity-100" : "opacity-80",
-                    )}
-                    data-testid={`thread-title-${thread.id}`}
-                  >
-                    {isSubagentThread ? (
-                      <SidebarSubagentLabel
-                        threadId={thread.id}
-                        parentThreadId={thread.parentThreadId}
-                        agentId={thread.subagentAgentId}
-                        nickname={thread.subagentNickname}
-                        role={thread.subagentRole}
-                        title={thread.title}
-                      />
-                    ) : (
-                      thread.title
-                    )}
-                  </span>
-                }
-              />
-              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
-                {thread.title}
-              </TooltipPopup>
-            </Tooltip>
+            <SidebarThreadTitleTooltip title={thread.title}>
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate transition-opacity group-hover/thread-row:opacity-100",
+                  isActive ? "opacity-100" : "opacity-80",
+                )}
+                data-testid={`thread-title-${thread.id}`}
+              >
+                {isSubagentThread ? (
+                  <SidebarSubagentLabel
+                    threadId={thread.id}
+                    parentThreadId={thread.parentThreadId}
+                    agentId={thread.subagentAgentId}
+                    nickname={thread.subagentNickname}
+                    role={thread.subagentRole}
+                    title={thread.title}
+                  />
+                ) : (
+                  thread.title
+                )}
+              </span>
+            </SidebarThreadTitleTooltip>
             {!isSubagentThread && threadStatus?.label === "Pending Approval" ? (
               <span
                 aria-label="Pending approval"
@@ -4281,27 +4286,29 @@ export default function Sidebar() {
                 onClick={(e) => e.stopPropagation()}
               />
             ) : (
-              <span
-                className={cn(
-                  "min-w-0 flex-1 truncate text-[length:var(--app-font-size-ui,12px)] text-foreground/86 transition-opacity group-hover/thread-row:opacity-100",
-                  isActive ? "opacity-100" : "opacity-80",
-                  isSubagentThread ? "leading-[18px] text-foreground/80" : "leading-5",
-                )}
-              >
-                {isSubagentThread ? (
-                  <SidebarSubagentLabel
-                    threadId={thread.id}
-                    parentThreadId={thread.parentThreadId}
-                    agentId={thread.subagentAgentId}
-                    nickname={thread.subagentNickname}
-                    role={thread.subagentRole}
-                    title={thread.title}
-                    roleClassName="text-muted-foreground/42"
-                  />
-                ) : (
-                  thread.title
-                )}
-              </span>
+              <SidebarThreadTitleTooltip title={thread.title}>
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-[length:var(--app-font-size-ui,12px)] text-foreground/86 transition-opacity group-hover/thread-row:opacity-100",
+                    isActive ? "opacity-100" : "opacity-80",
+                    isSubagentThread ? "leading-[18px] text-foreground/80" : "leading-5",
+                  )}
+                >
+                  {isSubagentThread ? (
+                    <SidebarSubagentLabel
+                      threadId={thread.id}
+                      parentThreadId={thread.parentThreadId}
+                      agentId={thread.subagentAgentId}
+                      nickname={thread.subagentNickname}
+                      role={thread.subagentRole}
+                      title={thread.title}
+                      roleClassName="text-muted-foreground/42"
+                    />
+                  ) : (
+                    thread.title
+                  )}
+                </span>
+              </SidebarThreadTitleTooltip>
             )}
             {!isSubagentThread && threadStatus?.label === "Pending Approval" ? (
               <span
