@@ -1202,6 +1202,55 @@ describe("TerminalManager", () => {
     manager.dispose();
   });
 
+  it("keeps an agent awake while its title spinner shows it is still working after a Stop", async () => {
+    // Codex can report a Stop while it keeps working (e.g. on a background
+    // terminal). Review-state output is ignored, so only the busy title
+    // spinner proves the agent is alive; once it stops, sleep resumes.
+    const { manager, ptyAdapter, logsDir } = makeManager(50, {
+      subprocessChecker: async () => false,
+      subprocessPollIntervalMs: 20,
+      processKillGraceMs: 10,
+      idleSleepMs: 80,
+      idleSleepCheckIntervalMs: 20,
+    });
+    const events: TerminalEvent[] = [];
+    manager.on("event", (event) => {
+      events.push(event);
+    });
+
+    await manager.open(openInput());
+    const firstProcess = ptyAdapter.processes[0];
+    expect(firstProcess).toBeDefined();
+    if (!firstProcess) return;
+
+    const sinkPath = `${historyLogPath(logsDir)}.events`;
+    await waitFor(() => fs.existsSync(sinkPath));
+    fs.appendFileSync(sinkPath, "\u001b]633;T3CODE_AGENT_EVENT=Stop\u0007\n");
+    await waitFor(() =>
+      events.some((event) => event.type === "activity" && event.agentState === "review"),
+    );
+
+    const spinnerFrames = ["\u280b", "\u2819", "\u2839", "\u2838"];
+    let frame = 0;
+    const spin = setInterval(() => {
+      frame += 1;
+      firstProcess.emitData(`\u001b]0;${spinnerFrames[frame % 4]} Reduce CI test suite time\u0007`);
+    }, 25);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(events.some((event) => event.type === "slept")).toBe(false);
+      expect(firstProcess.killed).toBe(false);
+    } finally {
+      clearInterval(spin);
+    }
+
+    firstProcess.emitData("\u001b]0;Reduce CI test suite time\u0007");
+    await waitFor(() => events.some((event) => event.type === "slept"), 2_000);
+    expect(firstProcess.killed).toBe(true);
+
+    manager.dispose();
+  });
+
   it("never sleeps a session that is mid-turn or waiting on an approval prompt", async () => {
     const { manager, logsDir, ptyAdapter } = makeManager(50, {
       subprocessChecker: async () => false,

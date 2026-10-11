@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultTerminalTitleForCliKind,
   deriveTerminalCommandIdentity,
+  isTerminalTitleBusySignal,
   terminalCliKindFromValue,
 } from "./terminalThreads";
 
@@ -27,5 +28,19 @@ describe("terminalThreads", () => {
       iconKey: "grok",
       title: "Grok",
     });
+  });
+});
+
+describe("isTerminalTitleBusySignal", () => {
+  it("treats a leading braille spinner frame as busy", () => {
+    expect(isTerminalTitleBusySignal("\u2826 Reduce CI test suite time | vclab")).toBe(true);
+    expect(isTerminalTitleBusySignal("  \u280b codex")).toBe(true);
+  });
+
+  it("ignores idle titles", () => {
+    expect(isTerminalTitleBusySignal("\u2733 Claude Code")).toBe(false);
+    expect(isTerminalTitleBusySignal("Reduce CI test suite time")).toBe(false);
+    expect(isTerminalTitleBusySignal("\u2800 blank braille")).toBe(false);
+    expect(isTerminalTitleBusySignal("")).toBe(false);
   });
 });

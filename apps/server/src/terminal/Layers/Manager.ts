@@ -21,6 +21,7 @@ import {
   deriveTerminalOutputIdentity,
   deriveTerminalProcessIdentity,
   deriveTerminalTitleSignalIdentity,
+  isTerminalTitleBusySignal,
   terminalCliKindFromValue,
   T3CODE_TERMINAL_HOOK_OSC_PREFIX,
   T3CODE_TERMINAL_CLI_META_OSC_PREFIX,
@@ -1302,6 +1303,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           spawnedAt: null,
           lastInputAt: null,
           lastOutputAt: null,
+          lastBusyTitleAt: null,
           lastOutputSignature: null,
           eventSinkPath: null,
           eventSinkWatcher: null,
@@ -1475,6 +1477,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           spawnedAt: null,
           lastInputAt: null,
           lastOutputAt: null,
+          lastBusyTitleAt: null,
           eventSinkPath: null,
           eventSinkWatcher: null,
           eventSinkOffset: 0,
@@ -1624,6 +1627,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.spawnedAt = null;
     session.lastInputAt = null;
     session.lastOutputAt = null;
+    session.lastBusyTitleAt = null;
     session.lastOutputSignature = null;
     session.updatedAt = new Date().toISOString();
 
@@ -1849,6 +1853,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         this.emitCliMetaSignal(session, cliMeta);
       }
     }
+    if (sanitized.titleSignals.some(isTerminalTitleBusySignal)) {
+      session.lastBusyTitleAt = Date.now();
+    }
     const titleSignalCliKind =
       sanitized.titleSignals
         .map((titleSignal) => deriveTerminalTitleSignalIdentity(titleSignal)?.cliKind ?? null)
@@ -2017,6 +2024,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.managedAgentObserved = false;
     session.lastInputAt = null;
     session.lastOutputAt = null;
+    session.lastBusyTitleAt = null;
     session.lastOutputSignature = null;
     session.outputPaused = false;
     session.status = "exited";
@@ -2052,6 +2060,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     session.managedAgentObserved = false;
     session.lastInputAt = null;
     session.lastOutputAt = null;
+    session.lastBusyTitleAt = null;
     session.lastOutputSignature = null;
     session.outputPaused = false;
     session.status = "exited";
@@ -2476,9 +2485,13 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     if (session.managedAgentState !== "review") return false;
     // A non-provider subprocess (build, test run, ...) keeps the PTY awake.
     if (session.hasRunningSubprocess) return false;
+    // A busy title spinner counts as activity even in "review": Codex can
+    // report a Stop while it keeps working (e.g. on a background terminal),
+    // and review-state output is otherwise ignored.
     const lastActivityAt = Math.max(
       session.lastInputAt ?? 0,
       session.lastOutputAt ?? 0,
+      session.lastBusyTitleAt ?? 0,
       session.spawnedAt ?? 0,
     );
     if (lastActivityAt <= 0) return false;

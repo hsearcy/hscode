@@ -108,6 +108,12 @@ export interface TerminalSessionState {
   lastInputAt: number | null;
   /** Latest wall-clock timestamp when the PTY emitted output. */
   lastOutputAt: number | null;
+  /**
+   * Latest wall-clock timestamp when the CLI's title showed a busy spinner.
+   * Unlike lastOutputAt it is never suppressed in "review", so idle sleep
+   * cannot reap an agent that is still visibly working.
+   */
+  lastBusyTitleAt: number | null;
   /** Normalized visible output used to ignore redraw-only PTY noise. */
   lastOutputSignature: string | null;
   /**

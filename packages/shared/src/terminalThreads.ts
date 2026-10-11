@@ -545,6 +545,15 @@ export function deriveTerminalTitleSignalIdentity(title: string): TerminalComman
     : null;
 }
 
+// Agent TUIs (Codex, Claude) animate a braille spinner at the start of the terminal
+// title only while a turn is in progress, so a spinner frame proves the agent is
+// working even when a missed or early Stop hook has parked it in "review".
+const BUSY_TITLE_SPINNER = /^[\u2801-\u28FF]/u;
+
+export function isTerminalTitleBusySignal(title: string): boolean {
+  return BUSY_TITLE_SPINNER.test(title.trimStart());
+}
+
 // Resolve terminal label, icon, and activity state from persisted metadata plus runtime status.
 export function resolveTerminalVisualIdentity(input: {
   cliKind?: TerminalCliKind | null | undefined;
