@@ -10,12 +10,21 @@ import {
   readLastTurn,
 } from "./cliTranscript";
 
+const line = (value: unknown) => JSON.stringify(value) + "\n";
+const claudeUser = (timestamp: string, content: unknown, extra: object = {}) =>
+  line({ type: "user", timestamp, message: { role: "user", content }, ...extra });
+const claudeText = (timestamp: string, text: string) =>
+  line({
+    type: "assistant",
+    timestamp,
+    message: { role: "assistant", content: [{ type: "text", text }] },
+  });
+
 describe("saved assistant responses", () => {
   const dirs: string[] = [];
   afterEach(async () => {
     await Promise.all(dirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
   });
-  const line = (value: unknown) => JSON.stringify(value) + "\n";
 
   it("reads the latest Codex assistant message, excluding tools and reasoning", () => {
     const content =
@@ -126,15 +135,6 @@ describe("saved assistant responses", () => {
   });
 
   describe("parseLastTurn", () => {
-    const claudeUser = (timestamp: string, content: unknown, extra: object = {}) =>
-      line({ type: "user", timestamp, message: { role: "user", content }, ...extra });
-    const claudeText = (timestamp: string, text: string) =>
-      line({
-        type: "assistant",
-        timestamp,
-        message: { role: "assistant", content: [{ type: "text", text }] },
-      });
-
     // Shape of the VCLab triage session: a long answer, then background-task
     // notifications and subagent hand-backs that the assistant answers too.
     it("keeps every reply after the last submitted prompt, ignoring injected user records", () => {
@@ -215,13 +215,66 @@ describe("saved assistant responses", () => {
       });
     });
 
-    it("reads Grok prompts and handles missing files", async () => {
-      const content =
-        line({ type: "user", content: "Hi" }) + line({ type: "assistant", content: "Hello" });
-      expect(parseLastTurn(content, "grok")).toMatchObject({
-        prompt: { text: "Hi" },
-        responses: [{ text: "Hello" }],
+    it("reads past long tool output to find the prompt", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hscode-turn-"));
+      dirs.push(dir);
+      const file = path.join(dir, "session.jsonl");
+      const toolOutput = claudeUser("t", [{ type: "tool_result", content: "z".repeat(500_000) }]);
+      await fs.writeFile(
+        file,
+        claudeUser("t", "old prompt") +
+          claudeUser("t", "Run the suite") +
+          toolOutput.repeat(6) +
+          claudeText("t", "All green."),
+      );
+      expect(await readLastTurn(file, "claude")).toMatchObject({
+        prompt: { text: "Run the suite" },
+        responses: [{ text: "All green." }],
+        truncated: false,
       });
+    });
+
+    it("reads newer Codex UserMessage items and ignores image parts", () => {
+      const item = (type: string, content: unknown) =>
+        line({ type: "event_msg", payload: { type: "item_completed", item: { type, content } } });
+      const content =
+        item("UserMessage", [{ type: "local_image" }, { type: "text", text: "What broke?" }]) +
+        item("CommandExecution", []) +
+        line({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "The deploy." }],
+          },
+        });
+      expect(parseLastTurn(content, "codex")).toMatchObject({
+        prompt: { text: "What broke?" },
+        responses: [{ text: "The deploy." }],
+      });
+    });
+
+    it("reads Grok prompts and handles missing files", async () => {
+      const user = (text: string) => line({ type: "user", content: [{ type: "text", text }] });
+      const content =
+        user("<system-reminder>\nskills</system-reminder>") +
+        user("<user_info>\nOS Version: linux\n</user_info>") +
+        user("<user_query>\nDid the Gmail API change?\n</user_query>") +
+        line({ type: "assistant", content: "" }) +
+        line({ type: "tool_result", content: "search results" }) +
+        line({
+          type: "user",
+          content: [
+            { type: "text", text: "[Image extracted from tool result above]" },
+            { type: "image" },
+          ],
+        }) +
+        line({ type: "assistant", content: "Yes." });
+      expect(parseLastTurn(content, "grok")).toMatchObject({
+        prompt: { text: "Did the Gmail API change?" },
+        responses: [{ text: "Yes." }],
+      });
+      expect(parseLastTurn(user("<user_info>x</user_info>"), "grok").prompt).toBeNull();
       expect(await readLastTurn("/nonexistent/session.jsonl", "grok")).toBeNull();
     });
   });

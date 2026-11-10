@@ -19,6 +19,7 @@ export interface SavedResponse {
 }
 const MAX_RESPONSE_LENGTH = 12_000;
 const MAX_READ_BYTES = 2 * 1024 * 1024;
+const MAX_LAST_TURN_READ_BYTES = 16 * 1024 * 1024;
 
 export function parseLastTurnActivity(content: string, kind: string): SavedTurnActivity | null {
   const lines = content.slice(0, content.lastIndexOf("\n") + 1).split("\n");
@@ -120,11 +121,12 @@ export class LastResponseReader {
 async function readTranscriptTail(
   file: string,
   size: number,
+  maxBytes = MAX_READ_BYTES,
 ): Promise<{ text: string; partial: boolean }> {
   const handle = await open(file, "r");
   try {
-    const start = Math.max(0, size - MAX_READ_BYTES);
-    const buffer = Buffer.alloc(Math.min(size, MAX_READ_BYTES));
+    const start = Math.max(0, size - maxBytes);
+    const buffer = Buffer.alloc(Math.min(size, maxBytes));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
     const text = buffer.subarray(0, bytesRead).toString("utf8");
     return { text: start > 0 ? text.slice(text.indexOf("\n") + 1) : text, partial: start > 0 };
@@ -170,12 +172,22 @@ function submittedPromptText(record: any, kind: string): string | null {
   let content: unknown;
   if (kind === "codex") {
     // Rollout user response_items also carry injected AGENTS.md/environment
-    // context; the user_message event is exactly what was typed.
-    if (record.type !== "event_msg" || record.payload?.type !== "user_message") return null;
-    content = record.payload.message;
+    // context. These events hold exactly what was typed: `user_message` in
+    // older Codex, a completed `UserMessage` item in newer Codex.
+    if (record.type !== "event_msg") return null;
+    if (record.payload?.type === "user_message") content = record.payload.message;
+    else if (
+      record.payload?.type === "item_completed" &&
+      record.payload.item?.type === "UserMessage"
+    )
+      content = record.payload.item.content;
+    else return null;
   } else if (kind === "grok") {
     if ((record.role ?? record.type) !== "user") return null;
-    content = record.content;
+    // Grok wraps typed prompts in <user_query>; other user records are
+    // injected (<user_info>, <system-reminder>, images from tool results).
+    const query = /<user_query>([\s\S]*?)<\/user_query>/.exec(joinText(record.content));
+    content = query ? query[1] : null;
   } else {
     if (record.type !== "user" || record.isMeta || record.isSidechain) return null;
     content = record.message?.content;
@@ -236,10 +248,15 @@ export function parseLastTurn(content: string, kind: string, maxLength = 60_000)
 export async function readLastTurn(file: string, kind: string): Promise<SavedTurn | null> {
   try {
     const info = await stat(file);
-    const { text, partial } = await readTranscriptTail(file, info.size);
-    const turn = parseLastTurn(text, kind);
-    // A prompt older than the tail we read means earlier responses may be missing.
-    return turn.prompt === null && partial ? { ...turn, truncated: true } : turn;
+    const tail = await readTranscriptTail(file, info.size);
+    let turn = parseLastTurn(tail.text, kind);
+    if (turn.prompt !== null || turn.truncated || !tail.partial) return turn;
+    // Long tool output can push the prompt out of the usual tail; look
+    // further back once before giving up.
+    const wide = await readTranscriptTail(file, info.size, MAX_LAST_TURN_READ_BYTES);
+    turn = parseLastTurn(wide.text, kind);
+    // A prompt older than what we read means earlier responses may be missing.
+    return turn.prompt === null && wide.partial ? { ...turn, truncated: true } : turn;
   } catch {
     return null;
   }
