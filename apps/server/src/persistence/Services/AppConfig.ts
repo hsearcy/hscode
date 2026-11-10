@@ -32,6 +32,11 @@ export interface AppConfigRepositoryShape {
   /** Insert or replace a config value. */
   readonly set: (entry: AppConfigEntry) => Effect.Effect<void, ProjectionRepositoryError>;
 
+  /** Read every config entry whose key starts with `prefix`. */
+  readonly listByPrefix: (
+    prefix: string,
+  ) => Effect.Effect<ReadonlyArray<{ key: string; value: string }>, ProjectionRepositoryError>;
+
   /** Remove a config key (no-op when absent). */
   readonly delete: (key: string) => Effect.Effect<void, ProjectionRepositoryError>;
 }

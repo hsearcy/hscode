@@ -64,6 +64,7 @@ import { OpenInEditorInput } from "./editor";
 import {
   ServerConfigUpdatedPayload,
   ServerGetProviderUsageSnapshotInput,
+  ServerSetClientStateInput,
   ServerSetProjectsRootInput,
   ServerProviderStatusesUpdatedPayload,
   ServerVoiceTranscriptionInput,
@@ -137,6 +138,8 @@ export const WS_METHODS = {
   serverTranscribeVoice: "server.transcribeVoice",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverSetProjectsRoot: "server.setProjectsRoot",
+  serverGetClientState: "server.getClientState",
+  serverSetClientState: "server.setClientState",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -240,6 +243,8 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverTranscribeVoice, ServerVoiceTranscriptionInput),
   tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
   tagRequestBody(WS_METHODS.serverSetProjectsRoot, ServerSetProjectsRootInput),
+  tagRequestBody(WS_METHODS.serverGetClientState, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverSetClientState, ServerSetClientStateInput),
 
   // Provider discovery
   tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),

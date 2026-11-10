@@ -32,6 +32,7 @@ import { useFocusedChatContext } from "../focusedChatContext";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { serverConfigQueryOptions, serverQueryKeys } from "../lib/serverReactQuery";
 import { readNativeApi } from "../nativeApi";
+import { startClientStateMirror } from "../clientStateMirror";
 import { clearPromotedDraftThreads, useComposerDraftStore } from "../composerDraftStore";
 import { useStore } from "../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
@@ -72,11 +73,20 @@ export const Route = createRootRouteWithContext<{
   }),
 });
 
+function useClientStateMirror() {
+  useEffect(() => {
+    const api = readNativeApi();
+    if (!api) return;
+    return startClientStateMirror(api.server);
+  }, []);
+}
+
 function RootRouteView() {
   useAppTypography();
   useChatCodeFont();
   useTheme();
   useUIFont();
+  useClientStateMirror();
 
   if (!readNativeApi()) {
     return (

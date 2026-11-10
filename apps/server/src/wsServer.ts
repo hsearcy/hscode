@@ -607,6 +607,9 @@ const decodeWebSocketRequest = decodeJsonResult(WebSocketRequest);
 // process reads this same key string directly from state.sqlite, so keep them
 // in sync (mirrored in apps/mcp/src/projects.ts).
 const APP_CONFIG_PROJECTS_ROOT_KEY = "projectsRoot";
+// app_config key prefix for the browser localStorage mirror (see
+// ServerGetClientStateResult).
+const APP_CONFIG_CLIENT_STATE_PREFIX = "clientState:";
 
 export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
@@ -2760,6 +2763,29 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           updatedAt: new Date().toISOString(),
         });
         return { projectsRoot: next };
+      }
+
+      case WS_METHODS.serverGetClientState: {
+        const rows = yield* appConfig.listByPrefix(APP_CONFIG_CLIENT_STATE_PREFIX);
+        const entries: Record<string, string> = {};
+        for (const row of rows) {
+          entries[row.key.slice(APP_CONFIG_CLIENT_STATE_PREFIX.length)] = row.value;
+        }
+        return { entries };
+      }
+
+      case WS_METHODS.serverSetClientState: {
+        const body = stripRequestTag(request.body);
+        const updatedAt = new Date().toISOString();
+        yield* Effect.forEach(
+          Object.entries(body.entries),
+          ([key, value]) =>
+            value === null
+              ? appConfig.delete(`${APP_CONFIG_CLIENT_STATE_PREFIX}${key}`)
+              : appConfig.set({ key: `${APP_CONFIG_CLIENT_STATE_PREFIX}${key}`, value, updatedAt }),
+          { discard: true },
+        );
+        return;
       }
 
       case WS_METHODS.providerGetComposerCapabilities: {

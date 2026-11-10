@@ -11,6 +11,8 @@ import {
 
 const AppConfigValueRow = Schema.Struct({ value: Schema.String });
 const GetAppConfigInput = Schema.Struct({ key: Schema.String });
+const AppConfigKeyValueRow = Schema.Struct({ key: Schema.String, value: Schema.String });
+const ListAppConfigByPrefixInput = Schema.Struct({ prefix: Schema.String });
 const DeleteAppConfigInput = Schema.Struct({ key: Schema.String });
 
 const makeAppConfigRepository = Effect.gen(function* () {
@@ -40,6 +42,17 @@ const makeAppConfigRepository = Effect.gen(function* () {
       `,
   });
 
+  const listAppConfigRowsByPrefix = SqlSchema.findAll({
+    Request: ListAppConfigByPrefixInput,
+    Result: AppConfigKeyValueRow,
+    execute: ({ prefix }) =>
+      sql`
+        SELECT key, value
+        FROM app_config
+        WHERE substr(key, 1, length(${prefix})) = ${prefix}
+      `,
+  });
+
   const deleteAppConfigRow = SqlSchema.void({
     Request: DeleteAppConfigInput,
     execute: ({ key }) =>
@@ -60,6 +73,11 @@ const makeAppConfigRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("AppConfigRepository.set:query")),
     );
 
+  const listByPrefix: AppConfigRepositoryShape["listByPrefix"] = (prefix) =>
+    listAppConfigRowsByPrefix({ prefix }).pipe(
+      Effect.mapError(toPersistenceSqlError("AppConfigRepository.listByPrefix:query")),
+    );
+
   const deleteKey: AppConfigRepositoryShape["delete"] = (key) =>
     deleteAppConfigRow({ key }).pipe(
       Effect.mapError(toPersistenceSqlError("AppConfigRepository.delete:query")),
@@ -68,6 +86,7 @@ const makeAppConfigRepository = Effect.gen(function* () {
   return {
     get,
     set,
+    listByPrefix,
     delete: deleteKey,
   } satisfies AppConfigRepositoryShape;
 });

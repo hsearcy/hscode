@@ -84,6 +84,21 @@ export const ServerSetProjectsRootResult = Schema.Struct({
 });
 export type ServerSetProjectsRootResult = typeof ServerSetProjectsRootResult.Type;
 
+// Durable server-side mirror of selected browser localStorage entries (settings,
+// sidebar layout). The browser profile can be wiped by a crash; the server db
+// survives it, so the client restores missing entries from here at boot.
+// Values are the raw localStorage strings; the client owns their schemas.
+export const ServerGetClientStateResult = Schema.Struct({
+  entries: Schema.Record(Schema.String, Schema.String),
+});
+export type ServerGetClientStateResult = typeof ServerGetClientStateResult.Type;
+
+// A null value removes the entry.
+export const ServerSetClientStateInput = Schema.Struct({
+  entries: Schema.Record(TrimmedNonEmptyString, Schema.NullOr(Schema.String)),
+});
+export type ServerSetClientStateInput = typeof ServerSetClientStateInput.Type;
+
 export const ServerManagedWorktree = Schema.Struct({
   path: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,

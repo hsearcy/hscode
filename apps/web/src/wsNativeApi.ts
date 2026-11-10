@@ -419,6 +419,8 @@ export function createWsNativeApi(): NativeApi {
       },
       upsertKeybinding: (input) => transport.request(WS_METHODS.serverUpsertKeybinding, input),
       setProjectsRoot: (input) => transport.request(WS_METHODS.serverSetProjectsRoot, input),
+      getClientState: () => transport.request(WS_METHODS.serverGetClientState),
+      setClientState: (input) => transport.request(WS_METHODS.serverSetClientState, input),
     },
     provider: {
       getComposerCapabilities: (input) =>

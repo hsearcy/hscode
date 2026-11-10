@@ -54,6 +54,8 @@ import type {
   ServerGetProviderUsageSnapshotResult,
   ServerListWorktreesResult,
   ServerRefreshProvidersResult,
+  ServerGetClientStateResult,
+  ServerSetClientStateInput,
   ServerSetProjectsRootInput,
   ServerSetProjectsRootResult,
   ServerUpsertKeybindingInput,
@@ -386,6 +388,8 @@ export interface NativeApi {
     ) => Promise<ServerVoiceTranscriptionResult>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     setProjectsRoot: (input: ServerSetProjectsRootInput) => Promise<ServerSetProjectsRootResult>;
+    getClientState: () => Promise<ServerGetClientStateResult>;
+    setClientState: (input: ServerSetClientStateInput) => Promise<void>;
   };
   provider: {
     getComposerCapabilities: (
