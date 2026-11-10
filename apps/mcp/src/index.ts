@@ -18,7 +18,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { lastAssistantTurn, lastMeaningfulLines, renderTerminal } from "./ansi.ts";
+import { CliTranscriptLocator, readLastTurn } from "@t3tools/shared/cliTranscript";
+import { resolveCodexHome } from "@t3tools/shared/codexConfig";
+import { CodexSessionMetadataReader } from "@t3tools/shared/codexSessionMetadata";
+import { composerDraft, lastAssistantTurn, lastMeaningfulLines, renderTerminal } from "./ansi.ts";
 import {
   DpcodeDb,
   DpcodeWs,
@@ -160,6 +163,7 @@ async function registerProject(opts: {
 const cfg = loadConfig();
 const db = new DpcodeDb(cfg.homeDir);
 const ws = new DpcodeWs(cfg);
+const transcripts = new CliTranscriptLocator(new CodexSessionMetadataReader(resolveCodexHome()));
 
 // ── Global thread-event subscriptions (webhook fan-out) ──────────────────
 //
@@ -422,7 +426,10 @@ function registerTools(server: McpServer): void {
     "read_thread",
     {
       description:
-        "Read the rendered terminal scrollback of an HS Code thread. Returns the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80.\n\n" +
+        "Read an HS Code thread. Returns `lastTurn`, `composerDraft` and `screen`.\n\n" +
+        "- `lastTurn` (Claude/Codex/Grok CLI threads) comes from the CLI's own session transcript, so it is the exact text the desktop shows. `prompt` is the last prompt the user SUBMITTED; `responses` is every assistant message after it, oldest first (replies to background-task notifications included). Prefer it over `screen` for what was said. Null when no transcript is found.\n" +
+        "- `composerDraft` is UNSENT text in the input box (typed by someone, or a CLI suggestion). It is never a submitted message. Null when the box is empty or unreadable.\n" +
+        "- `screen` is the rendered terminal scrollback: the last `lines` lines of meaningful content (spinner glyphs filtered out), default 80. Use it for live TUI state (menus, permission prompts, progress). It is a replay of raw PTY output, so it can be clipped or garbled when the replay size differs from the live terminal.\n\n" +
         "Interpreting the output (Claude Code / Codex TUI):\n" +
         "- Lines starting with `> ` (chat-bubble blocks in scrollback) are messages the USER actually sent. These are historical.\n" +
         "- Lines starting with `● ` are messages the ASSISTANT sent (Claude's responses, tool calls).\n" +
@@ -447,6 +454,9 @@ function registerTools(server: McpServer): void {
       const text = await renderTerminal(snap.history);
       const tail = lastMeaningfulLines(text, args.lines ?? 80);
       const activity = ws.getActivity(row.threadId);
+      const kind = CliTranscriptLocator.kindOf(row.cliKind);
+      const transcript = kind ? await transcripts.resolve(row).catch(() => null) : null;
+      const lastTurn = transcript && kind ? await readLastTurn(transcript, kind) : null;
       return {
         content: [
           {
@@ -461,6 +471,8 @@ function registerTools(server: McpServer): void {
                   pid: snap.pid,
                   updatedAt: snap.updatedAt,
                 },
+                lastTurn,
+                composerDraft: composerDraft(text),
                 screen: tail,
               },
               null,

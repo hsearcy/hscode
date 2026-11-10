@@ -184,3 +184,24 @@ function cleanNoise(lines: string[]): string[] {
   while (out.length > 0 && out[out.length - 1]!.trim() === "") out.pop();
   return out;
 }
+
+// Unsent text in the Claude Code composer: the `❯ ...` lines between the last
+// two horizontal rules. Null when the box is empty or not found (e.g. a
+// garbled render, or a TUI without a ruled composer).
+const COMPOSER_RULE = /^\s*[─━]{3,}\s*$/;
+
+export function composerDraft(text: string): string | null {
+  const lines = text.split("\n");
+  let bottom = lines.length - 1;
+  while (bottom >= 0 && !COMPOSER_RULE.test(lines[bottom]!)) bottom--;
+  let top = bottom - 1;
+  while (top >= 0 && bottom - top <= 30 && !COMPOSER_RULE.test(lines[top]!)) top--;
+  if (top < 0 || bottom - top > 30) return null;
+  const body = lines.slice(top + 1, bottom);
+  if (body.length === 0 || !/^[❯>]/.test(body[0]!)) return null;
+  const draft = body
+    .map((line, i) => (i === 0 ? line.replace(/^[❯>]\s?/, "") : line.replace(/^ {2}/, "")))
+    .join("\n")
+    .trim();
+  return draft || null;
+}

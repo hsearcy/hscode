@@ -6,16 +6,14 @@ import type {
   OrchestrationThread,
 } from "@t3tools/contracts";
 import { resolveCodexHome } from "@t3tools/shared/codexConfig";
-import { glob, stat } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import type { TerminalSessionActivity } from "./terminal/Services/Manager";
-import { CodexSessionMetadataReader } from "./terminal/codexSessionMetadata";
 import {
+  CliTranscriptLocator,
   LastResponseReader,
   type SavedResponse,
   type SavedTurnActivity,
-} from "./terminal/lastResponse";
+} from "@t3tools/shared/cliTranscript";
+import { CodexSessionMetadataReader } from "@t3tools/shared/codexSessionMetadata";
 
 export function commandThreadStatus(
   thread: OrchestrationThread,
@@ -68,8 +66,9 @@ export function commandThreadActivityAt(
 /** Shared read-only snapshot. No terminal.open/write calls or provider turns. */
 export class CommandViewReader {
   private responses = new LastResponseReader();
-  private codex = new CodexSessionMetadataReader(resolveCodexHome());
-  private paths = new Map<string, string>();
+  private transcripts = new CliTranscriptLocator(
+    new CodexSessionMetadataReader(resolveCodexHome()),
+  );
   private pending: Promise<CommandViewSnapshot> | null = null;
 
   private async responseFor(thread: OrchestrationThread): Promise<SavedResponse | null> {
@@ -85,40 +84,9 @@ export class CommandViewReader {
           }
         : null;
     }
-    const sessionId = thread.cliSessionId;
-    if (thread.cliKind === "codex") {
-      const metadata = await this.codex.resolve(sessionId ?? null, thread.title);
-      return metadata ? this.responses.read(metadata.rolloutPath, "codex") : null;
-    }
-    if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
-    const kind = thread.cliKind === "claudex" ? "claude" : thread.cliKind;
-    const home =
-      kind === "grok"
-        ? process.env.GROK_HOME || path.join(os.homedir(), ".grok")
-        : process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
-    const key = `${kind}:${home}:${sessionId}`;
-    let file = this.paths.get(key);
-    if (file) {
-      try {
-        await stat(file);
-      } catch {
-        this.paths.delete(key);
-        file = undefined;
-      }
-    }
-    if (!file) {
-      const pattern =
-        kind === "grok"
-          ? `sessions/*/${sessionId}/chat_history.jsonl`
-          : `projects/*/${sessionId}.jsonl`;
-      for await (const relative of glob(pattern, { cwd: home })) {
-        file = path.join(home, relative);
-        if (this.paths.size >= 200) this.paths.delete(this.paths.keys().next().value!);
-        this.paths.set(key, file);
-        break;
-      }
-    }
-    return file ? this.responses.read(file, kind) : null;
+    const file = await this.transcripts.resolve(thread);
+    const kind = CliTranscriptLocator.kindOf(thread.cliKind);
+    return file && kind ? this.responses.read(file, kind) : null;
   }
 
   read(

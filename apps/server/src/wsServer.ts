@@ -67,7 +67,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import { createLogger } from "./logger";
 import { CommandViewReader } from "./commandView";
-import { CodexSessionMetadataReader } from "./terminal/codexSessionMetadata";
+import { CodexSessionMetadataReader } from "@t3tools/shared/codexSessionMetadata";
 import {
   checkpointRefForThreadTurn,
   checkpointRefForThreadTurnStart,
